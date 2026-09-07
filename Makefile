@@ -36,9 +36,9 @@ test: ## unit tests (no docker, no cluster)
 	go test ./... -count=1
 
 .PHONY: test-envtest
-test-envtest: ## controller tests against a local control plane
+test-envtest: ## controller and webhook tests against a local control plane
 	KUBEBUILDER_ASSETS="$$(go tool setup-envtest use $(ENVTEST_K8S_VERSION) -p path)" \
-		go test ./internal/controller/... -count=1 -tags=envtest
+		go test ./internal/controller/... ./internal/webhook/... -count=1 -tags=envtest
 
 .PHONY: test-e2e
 test-e2e: ## testcontainers end-to-end (needs a docker daemon)
@@ -62,6 +62,21 @@ compose-up: compose-certs
 .PHONY: compose-down
 compose-down:
 	docker compose -f deploy/compose/docker-compose.yaml down -v
+
+## --- deploy ----------------------------------------------------------------
+
+.PHONY: install
+install: manifests ## CRDs only
+	go tool kustomize build config/crd | kubectl apply -f -
+
+.PHONY: deploy
+deploy: manifests ## the whole operator; needs cert-manager for the webhook certificate
+	cd config/default && go tool kustomize edit set image ghcr.io/maitredede/mailout-operator=$(IMG)
+	go tool kustomize build config/default | kubectl apply -f -
+
+.PHONY: undeploy
+undeploy:
+	go tool kustomize build config/default | kubectl delete --ignore-not-found -f -
 
 .PHONY: help
 help:

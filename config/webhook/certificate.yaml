@@ -1,0 +1,24 @@
+# The webhook's serving certificate, issued by cert-manager. The CA bundle is
+# injected into the ValidatingWebhookConfiguration by cert-manager's ca-injector
+# through the cert-manager.io/inject-ca-from annotation in kustomization.yaml.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: mailout-selfsigned
+  namespace: mailout-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mailout-webhook
+  namespace: mailout-system
+spec:
+  secretName: mailout-webhook-tls
+  dnsNames:
+    - mailout-webhook.mailout-system.svc
+    - mailout-webhook.mailout-system.svc.cluster.local
+  issuerRef:
+    name: mailout-selfsigned
+    kind: Issuer

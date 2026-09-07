@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mailout-system
+  labels:
+    app.kubernetes.io/name: mailout
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailout-operator
+  namespace: mailout-system
+  labels:
+    app.kubernetes.io/name: mailout
+    app.kubernetes.io/component: operator
+spec:
+  # Raise to 2 for high availability: leader election is enabled below, so only
+  # one replica reconciles and the other takes over within seconds.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mailout
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mailout
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: mailout-operator
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: ghcr.io/maitredede/mailout-operator:dev
+          args:
+            - operator
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+            - --metrics-bind-address=:8080
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # The dataplane runs the same image, so both halves stay in step.
+            - name: MAILOUT_GATEWAY_IMAGE
+              value: ghcr.io/maitredede/mailout-operator:dev
+          ports:
+            - name: webhook
+              containerPort: 9443
+            - name: metrics
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: mailout-webhook-tls
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mailout-operator
+  namespace: mailout-system

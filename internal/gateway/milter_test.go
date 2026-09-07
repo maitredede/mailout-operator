@@ -294,7 +294,7 @@ func TestMilterAddressParsing(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.address, func(t *testing.T) {
-			network, addr, err := Milter{Address: tc.address}.network()
+			network, addr, err := Milter{Address: tc.address}.ParseAddress()
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
 			}

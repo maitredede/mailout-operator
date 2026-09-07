@@ -11,6 +11,7 @@ import (
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
 	certmanagerv1 "github.com/maitredede/mailout-operator/internal/certmanager/v1"
 	"github.com/maitredede/mailout-operator/internal/controller"
+	mailoutwebhook "github.com/maitredede/mailout-operator/internal/webhook/v1alpha1"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -23,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
 // operatorOptions are the manager's knobs.
@@ -33,6 +35,9 @@ type operatorOptions struct {
 	namespace      string
 	gatewayImage   string
 	developmentLog bool
+	enableWebhooks bool
+	webhookPort    int
+	webhookCertDir string
 }
 
 func newOperatorCommand() *cobra.Command {
@@ -57,6 +62,11 @@ func newOperatorCommand() *cobra.Command {
 	f.StringVar(&opts.gatewayImage, "gateway-image", os.Getenv("MAILOUT_GATEWAY_IMAGE"),
 		"image running the dataplane; defaults to $MAILOUT_GATEWAY_IMAGE")
 	f.BoolVar(&opts.developmentLog, "development-log", false, "human-readable, verbose logging")
+	f.BoolVar(&opts.enableWebhooks, "enable-webhooks", true,
+		"serve the validating webhooks; requires a certificate in --webhook-cert-dir")
+	f.IntVar(&opts.webhookPort, "webhook-port", 9443, "webhook server port")
+	f.StringVar(&opts.webhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs",
+		"directory holding tls.crt and tls.key for the webhook server")
 	return cmd
 }
 
@@ -84,7 +94,7 @@ func runOperator(ctx context.Context, opts *operatorOptions) error {
 	}
 	log.Info("cert-manager detection", "available", certManagerAvailable)
 
-	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+	options := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: opts.metricsAddr},
 		HealthProbeBindAddress: opts.probeAddr,
@@ -105,7 +115,15 @@ func runOperator(ctx context.Context, opts *operatorOptions) error {
 				},
 			},
 		},
-	})
+	}
+	if opts.enableWebhooks {
+		options.WebhookServer = webhookserver.NewServer(webhookserver.Options{
+			Port:    opts.webhookPort,
+			CertDir: opts.webhookCertDir,
+		})
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, options)
 	if err != nil {
 		return fmt.Errorf("create manager: %w", err)
 	}
@@ -126,6 +144,15 @@ func runOperator(ctx context.Context, opts *operatorOptions) error {
 		OperatorNamespace: opts.namespace,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up account controller: %w", err)
+	}
+
+	if opts.enableWebhooks {
+		if err := mailoutwebhook.SetupGatewayWebhookWithManager(mgr, opts.namespace, certManagerAvailable); err != nil {
+			return fmt.Errorf("set up gateway webhook: %w", err)
+		}
+		if err := mailoutwebhook.SetupAccountWebhookWithManager(mgr, opts.namespace); err != nil {
+			return fmt.Errorf("set up account webhook: %w", err)
+		}
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

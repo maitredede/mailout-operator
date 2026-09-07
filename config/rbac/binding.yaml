@@ -1,0 +1,40 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mailout-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mailout-operator
+subjects:
+  - kind: ServiceAccount
+    name: mailout-operator
+    namespace: mailout-system
+---
+# Leader election, so several operator replicas can run with one reconciling.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mailout-operator-leader-election
+  namespace: mailout-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mailout-operator-leader-election
+  namespace: mailout-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mailout-operator-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: mailout-operator
+    namespace: mailout-system

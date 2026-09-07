@@ -258,7 +258,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	for i, m := range c.Milters {
-		if _, _, err := m.network(); err != nil {
+		if _, _, err := m.ParseAddress(); err != nil {
 			errs = append(errs, fmt.Sprintf("milters[%d] (%s): %v", i, m.Name, err))
 		}
 	}

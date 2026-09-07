@@ -34,8 +34,9 @@ type Milter struct {
 
 const defaultMilterTimeout = 30 * time.Second
 
-// network splits Address into what net.Dial expects.
-func (m Milter) network() (network, address string, err error) {
+// ParseAddress splits Address into what net.Dial expects. Exported so that the
+// admission webhook accepts exactly what the dataplane can dial.
+func (m Milter) ParseAddress() (network, address string, err error) {
 	switch {
 	case strings.HasPrefix(m.Address, "tcp://"):
 		return "tcp", strings.TrimPrefix(m.Address, "tcp://"), nil
@@ -87,7 +88,7 @@ func newMilterChain(cfg *Config, log *slog.Logger) (*milterChain, error) {
 		if name == "" {
 			name = fmt.Sprintf("milters[%d]", i)
 		}
-		network, address, err := mc.network()
+		network, address, err := mc.ParseAddress()
 		if err != nil {
 			return nil, fmt.Errorf("milter %s: %w", name, err)
 		}
