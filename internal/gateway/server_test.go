@@ -159,7 +159,7 @@ func newTestGateway(t *testing.T, opts ...func(*Config)) *testGateway {
 	// Port 0 means the kernel picks the port, so the addresses are only known
 	// once the listeners are open: Run reports them back through a channel.
 	addrs := make(chan string, 2)
-	srv.onListen = func(_ Listener, addr string) { addrs <- addr }
+	srv.SetOnListen(func(_ Listener, addr string) { addrs <- addr })
 
 	ctx := t.Context()
 	done := make(chan error, 1)

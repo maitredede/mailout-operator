@@ -111,6 +111,15 @@ type Server struct {
 	onListen func(l Listener, addr string)
 }
 
+// SetOnListen registers a callback invoked with each listener's resolved
+// address once it is open. It exists for tests that bind port 0 and therefore
+// only learn the port from the kernel.
+func (s *Server) SetOnListen(fn func(l Listener, addr string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onListen = fn
+}
+
 // NewServer builds a dataplane serving cfg.
 func NewServer(cfg *Config, log *slog.Logger) (*Server, error) {
 	if log == nil {
@@ -171,8 +180,11 @@ func (s *Server) Run(ctx context.Context) error {
 		s.mu.Unlock()
 
 		s.log.Info("listening", "name", lc.Name, "addr", l.Addr().String(), "mode", lc.Mode)
-		if s.onListen != nil {
-			s.onListen(lc, l.Addr().String())
+		s.mu.Lock()
+		onListen := s.onListen
+		s.mu.Unlock()
+		if onListen != nil {
+			onListen(lc, l.Addr().String())
 		}
 		wg.Add(1)
 		go func(lc Listener, l net.Listener) {
