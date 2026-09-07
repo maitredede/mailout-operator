@@ -30,6 +30,20 @@ const (
 	RestartHashAnnotation = "mailout.daly.nc/restart-hash"
 )
 
+// The dataplane runs as this user, the nonroot user of the distroless base
+// image. It is set explicitly rather than inherited, because the mounted
+// Secrets are made readable by exactly this uid and gid.
+const (
+	dataplaneUID = int64(65532)
+	dataplaneGID = int64(65532)
+	// secretFileMode leaves the mounted Secrets readable by their group only.
+	// The kubelet sets that group from the pod's fsGroup, so this mode plus
+	// fsGroup is what makes the files readable by a non-root process — mounting
+	// them 0400 would leave them owned by root and unreadable, which is a
+	// failure only a real cluster reveals.
+	secretFileMode = int32(0o440)
+)
+
 // ConfigSecretName is the Secret holding the rendered configuration.
 func ConfigSecretName(gatewayName string) string { return gatewayName + ConfigSecretSuffix }
 
@@ -147,7 +161,7 @@ func Deployment(gw *v1alpha1.MailoutGateway, cfg *gateway.Config, accounts []Acc
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName:  ConfigSecretName(gw.Name),
-				DefaultMode: ptr.To(int32(0o400)),
+				DefaultMode: ptr.To(secretFileMode),
 			},
 		},
 	}}
@@ -160,7 +174,7 @@ func Deployment(gw *v1alpha1.MailoutGateway, cfg *gateway.Config, accounts []Acc
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName:  secretName,
-					DefaultMode: ptr.To(int32(0o400)),
+					DefaultMode: ptr.To(secretFileMode),
 				},
 			},
 		})
@@ -177,7 +191,7 @@ func Deployment(gw *v1alpha1.MailoutGateway, cfg *gateway.Config, accounts []Acc
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName:  secretName,
-					DefaultMode: ptr.To(int32(0o400)),
+					DefaultMode: ptr.To(secretFileMode),
 				},
 			},
 		})
@@ -240,6 +254,8 @@ func Deployment(gw *v1alpha1.MailoutGateway, cfg *gateway.Config, accounts []Acc
 							AllowPrivilegeEscalation: ptr.To(false),
 							ReadOnlyRootFilesystem:   ptr.To(true),
 							RunAsNonRoot:             ptr.To(true),
+							RunAsUser:                ptr.To(dataplaneUID),
+							RunAsGroup:               ptr.To(dataplaneGID),
 							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 						},
 					}},
@@ -248,7 +264,12 @@ func Deployment(gw *v1alpha1.MailoutGateway, cfg *gateway.Config, accounts []Acc
 					Tolerations:  gw.Spec.Deployment.Tolerations,
 					Affinity:     gw.Spec.Deployment.Affinity,
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot:   ptr.To(true),
+						RunAsNonRoot: ptr.To(true),
+						RunAsUser:    ptr.To(dataplaneUID),
+						RunAsGroup:   ptr.To(dataplaneGID),
+						// The kubelet applies this group to the mounted Secrets,
+						// which is what lets a non-root process read them.
+						FSGroup:        ptr.To(dataplaneGID),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 				},

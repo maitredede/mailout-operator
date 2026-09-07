@@ -156,12 +156,18 @@ what to look at.
 make test           # unit tests: no docker, no cluster
 make test-envtest   # controllers and webhooks against a real API server
 make test-e2e       # the real thing: Mailpit and ClamAV in containers
+make test-cluster   # the operator against a throwaway k3s: pods that actually run
 make lint build
 ```
 
 `controller-gen`, `kustomize` and `setup-envtest` are declared as Go tool
 dependencies, so there is nothing to install: `make generate manifests` works
 from a bare checkout.
+
+`make test-cluster` is the one that catches what the others cannot: it starts a
+real k3s in a container, deploys the operator's own output into it, and sends a
+message through the pod that comes out. A rendered manifest can be perfectly
+valid and still produce a container that will not start.
 
 ## Not there yet
 

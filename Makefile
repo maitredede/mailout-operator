@@ -44,6 +44,12 @@ test-envtest: ## controller and webhook tests against a local control plane
 test-e2e: ## testcontainers end-to-end (needs a docker daemon)
 	go test ./test/e2e/... -count=1 -tags=e2e -timeout=20m
 
+.PHONY: test-cluster
+test-cluster: manifests ## the whole operator against a throwaway k3s (needs a docker daemon)
+	docker build -t mailout-operator:test .
+	MAILOUT_TEST_IMAGE=mailout-operator:test \
+		go test ./test/cluster/... -count=1 -tags=cluster -timeout=30m
+
 .PHONY: lint
 lint:
 	go vet ./...

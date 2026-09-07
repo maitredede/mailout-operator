@@ -417,3 +417,43 @@ func TestServicePortsMatchListeners(t *testing.T) {
 		t.Fatalf("selector = %v", svc.Spec.Selector)
 	}
 }
+
+// The mounted Secrets must be readable by the non-root process that runs the
+// dataplane. Mounting them 0400 leaves them owned by root and unreadable, which
+// only a real cluster reveals — hence this regression test.
+func TestMountedSecretsAreReadableByTheDataplaneUser(t *testing.T) {
+	gw := testGateway()
+	cfg, err := GatewayConfig(Input{Gateway: gw})
+	if err != nil {
+		t.Fatalf("GatewayConfig: %v", err)
+	}
+	deploy := Deployment(gw, cfg, nil, "image:test")
+
+	podSecurity := deploy.Spec.Template.Spec.SecurityContext
+	if podSecurity == nil || podSecurity.FSGroup == nil {
+		t.Fatal("the pod has no fsGroup, so the mounted Secrets stay owned by root")
+	}
+	fsGroup := *podSecurity.FSGroup
+	if podSecurity.RunAsUser == nil || podSecurity.RunAsGroup == nil {
+		t.Fatal("the pod does not pin its user and group")
+	}
+	if *podSecurity.RunAsGroup != fsGroup {
+		t.Fatalf("runAsGroup %d does not match fsGroup %d, so group-readable files are still unreadable",
+			*podSecurity.RunAsGroup, fsGroup)
+	}
+
+	for _, volume := range deploy.Spec.Template.Spec.Volumes {
+		if volume.Secret == nil {
+			continue
+		}
+		if volume.Secret.DefaultMode == nil {
+			t.Errorf("volume %s has no defaultMode", volume.Name)
+			continue
+		}
+		// Group-readable is the point; anything stricter locks the process out.
+		if mode := *volume.Secret.DefaultMode; mode&0o040 == 0 {
+			t.Errorf("volume %s is mounted %#o, which the dataplane user cannot read",
+				volume.Name, mode)
+		}
+	}
+}
