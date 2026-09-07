@@ -57,4 +57,26 @@ SMTP error 550: 5.7.1 Malware detected: Eicar-Signature
 `failOpen` is off, so if the scanner is unreachable the gateway answers 451 and
 the client retries — mail never goes out unscanned.
 
+## DKIM
+
+`make compose-certs` also generates `certs/dkim.key` and prints the TXT record
+that would publish it. The gateway signs only mail whose sender domain has a
+key — `example.test` in this stack; anything else goes out unsigned rather than
+mis-signed under a domain we do not own.
+
+Signing happens *after* the filters, so the signature covers the body and
+headers the filters left behind. That is visible in the signed header list of a
+relayed message, which includes ClamAV's own headers:
+
+```
+h=Received:Subject:From:To:X-Virus-Scanned:X-Virus-Status
+```
+
+To create a key for a real domain:
+
+```bash
+mailout dkim-key --domain example.com --selector mail -o dkim.key
+# then publish the printed TXT record at mail._domainkey.example.com
+```
+
 The same scenarios run unattended as Go tests: `make test-e2e`.

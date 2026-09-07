@@ -28,6 +28,7 @@ type snapshot struct {
 	certs    *certStore
 	relay    *relayer
 	milters  *milterChain
+	dkim     *dkimSigner
 }
 
 func newSnapshot(cfg *Config, log *slog.Logger) (*snapshot, error) {
@@ -47,12 +48,17 @@ func newSnapshot(cfg *Config, log *slog.Logger) (*snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	signer, err := newDKIMSigner(cfg.DKIM, log)
+	if err != nil {
+		return nil, err
+	}
 	return &snapshot{
 		config:   cfg,
 		accounts: newAccountStore(cfg.Accounts),
 		certs:    certs,
 		relay:    relay,
 		milters:  milters,
+		dkim:     signer,
 	}, nil
 }
 
@@ -96,6 +102,7 @@ func (s *Server) Reload(cfg *Config) error {
 		"accounts", len(snap.config.Accounts),
 		"certificates", len(snap.config.TLS.Certificates),
 		"milters", len(snap.config.Milters),
+		"dkimKeys", len(snap.config.DKIM),
 		"upstream", snap.config.Upstream.Address())
 	return nil
 }
@@ -303,6 +310,18 @@ func (s *session) Data(r io.Reader) error {
 			s.server.log.Info("message rejected by a filter",
 				"account", msg.Account, "from", msg.From, "err", err)
 			return err
+		}
+	}
+
+	// Signed last, so the signature covers what the filters left behind.
+	if !s.snap.dkim.empty() {
+		if err := s.snap.dkim.sign(msg); err != nil {
+			s.server.log.Error("DKIM signing failed", "account", msg.Account, "err", err)
+			return &smtp.SMTPError{
+				Code:         451,
+				EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+				Message:      "Unable to sign the message, try again later",
+			}
 		}
 	}
 

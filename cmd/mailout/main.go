@@ -20,7 +20,7 @@ func main() {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newGatewayCommand(), newHashPasswordCommand())
+	root.AddCommand(newGatewayCommand(), newHashPasswordCommand(), newDKIMKeyCommand())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

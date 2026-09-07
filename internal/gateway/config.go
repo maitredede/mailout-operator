@@ -42,7 +42,9 @@ type Config struct {
 	Accounts  []Account  `json:"accounts"`
 	// Milters are applied in order, each seeing the previous one's changes.
 	Milters []Milter `json:"milters,omitempty"`
-	Limits  Limits   `json:"limits"`
+	// DKIM keys, one per signing domain. Signing happens after the milters.
+	DKIM   []DKIMKey `json:"dkim,omitempty"`
+	Limits Limits    `json:"limits"`
 }
 
 // Listener is one socket the gateway accepts submissions on.

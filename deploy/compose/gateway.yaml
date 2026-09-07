@@ -32,6 +32,13 @@ accounts:
   - username: app1
     passwordHash: "$2a$12$C7yTXw50xW.ESgrG6t3Ip.Nm0epgrTWQfX88LiB7PZc/SqmfLmLki"
 
+dkim:
+  # Only mail whose sender domain matches gets signed; anything else goes out
+  # unsigned rather than mis-signed.
+  - domain: example.test
+    selector: mail
+    privateKeyFile: /etc/mailout/certs/dkim.key
+
 milters:
   - name: clamav
     address: tcp://clamav-milter:7357
