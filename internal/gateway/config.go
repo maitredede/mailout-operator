@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Damien Daly.
+// Copyright (c) 2026 Damien Daly. All rights reserved.
 
 // Package gateway implements the mailout SMTP dataplane. It deliberately has no
 // dependency on the Kubernetes API: configuration is handed to it as an

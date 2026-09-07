@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Damien Daly.
+// Copyright (c) 2026 Damien Daly. All rights reserved.
 
 // Package render turns the API objects into the dataplane's own configuration
 // and into the Kubernetes objects that carry it. Everything here is a pure

@@ -1,7 +1,6 @@
 //go:build envtest
 
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Damien Daly.
+// Copyright (c) 2026 Damien Daly. All rights reserved.
 
 package v1alpha1
 

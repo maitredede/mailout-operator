@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Damien Daly.
+// Copyright (c) 2026 Damien Daly. All rights reserved.
 
 // Package v1 declares the minimum of cert-manager's API the operator writes:
 // a Certificate with a secret name, DNS names and an issuer reference.

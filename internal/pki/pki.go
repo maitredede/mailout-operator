@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Damien Daly.
+// Copyright (c) 2026 Damien Daly. All rights reserved.
 
 // Package pki generates throwaway certificates for tests and for the local
 // docker-compose stack. In a cluster, certificates come from cert-manager;

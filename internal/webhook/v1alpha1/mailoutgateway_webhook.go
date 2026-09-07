@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Damien Daly.
+// Copyright (c) 2026 Damien Daly. All rights reserved.
 
 // Package v1alpha1 validates the mailout API objects at admission time, so that
 // a mistake is reported when it is made rather than discovered later in a

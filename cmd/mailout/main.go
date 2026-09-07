@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Damien Daly.
+// Copyright (c) 2026 Damien Daly. All rights reserved.
 
 // Command mailout is both halves of the operator: the SMTP dataplane
 // ("gateway") and the Kubernetes controller manager ("operator"). One binary,

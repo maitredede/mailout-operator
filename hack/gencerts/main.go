@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Damien Daly.
+// Copyright (c) 2026 Damien Daly. All rights reserved.
 
 // Command gencerts writes a throwaway CA and server certificate for the local
 // docker-compose stack, so that trying the relay locally needs neither openssl

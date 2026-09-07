@@ -1,7 +1,6 @@
 //go:build e2e
 
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Damien Daly.
+// Copyright (c) 2026 Damien Daly. All rights reserved.
 
 // Package e2e drives the dataplane against the real services it is meant to
 // work with: a real SMTP target and a real ClamAV. The gateway itself runs

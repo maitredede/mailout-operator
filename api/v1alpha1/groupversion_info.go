@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Damien Daly.
+// Copyright (c) 2026 Damien Daly. All rights reserved.
 
 // Package v1alpha1 holds the mailout API types: MailoutGateway, which describes
 // one relay and where it sends, and MailoutAccount, which is one application's

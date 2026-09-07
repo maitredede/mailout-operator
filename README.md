@@ -171,4 +171,4 @@ bounces for clients that cannot retry.
 
 ## License
 
-MIT.
+Private, all rights reserved. No license granted.

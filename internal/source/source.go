@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Damien Daly.
+// Copyright (c) 2026 Damien Daly. All rights reserved.
 
 // Package source provides the dataplane's configuration, from a file when the
 // gateway runs standalone (docker-compose, tests) or from the Kubernetes API
