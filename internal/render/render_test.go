@@ -352,17 +352,18 @@ func TestAccountSecretShape(t *testing.T) {
 			SecretRef: v1alpha1.LocalObjectReference{Name: "invoicing-smtp"},
 		},
 	}
-	secret := AccountSecret(account, "billing.invoicing", "s3cret", GatewayEndpoint(gw, cfg))
+	secret := AccountSecret(account, "billing.invoicing", "s3cret", "$2a$12$hash", GatewayEndpoint(gw, cfg))
 
 	if secret.Type != "kubernetes.io/basic-auth" {
 		t.Fatalf("type = %q", secret.Type)
 	}
 	want := map[string]string{
-		"username": "billing.invoicing",
-		"password": "s3cret",
-		"host":     "default.mailout-system.svc",
-		"port":     "587",
-		"tls":      "starttls",
+		"username":     "billing.invoicing",
+		"password":     "s3cret",
+		"passwordHash": "$2a$12$hash",
+		"host":         "default.mailout-system.svc",
+		"port":         "587",
+		"tls":          "starttls",
 	}
 	for key, value := range want {
 		if got := string(secret.Data[key]); got != value {

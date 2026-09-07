@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Damien Daly.
+
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/maitredede/mailout-operator/api/v1alpha1"
+	certmanagerv1 "github.com/maitredede/mailout-operator/internal/certmanager/v1"
+	"github.com/maitredede/mailout-operator/internal/controller"
+	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+)
+
+// operatorOptions are the manager's knobs.
+type operatorOptions struct {
+	metricsAddr    string
+	probeAddr      string
+	leaderElect    bool
+	namespace      string
+	gatewayImage   string
+	developmentLog bool
+}
+
+func newOperatorCommand() *cobra.Command {
+	opts := &operatorOptions{}
+	cmd := &cobra.Command{
+		Use:   "operator",
+		Short: "Run the Kubernetes controller manager",
+		Long: "Reconcile MailoutGateway and MailoutAccount objects into a running relay. " +
+			"Gateways are only served in the operator's own namespace, which keeps upstream " +
+			"credentials out of tenant namespaces.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runOperator(cmd.Context(), opts)
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&opts.metricsAddr, "metrics-bind-address", "0", "metrics endpoint address; 0 disables it")
+	f.StringVar(&opts.probeAddr, "health-probe-bind-address", ":8081", "health probe endpoint address")
+	f.BoolVar(&opts.leaderElect, "leader-elect", false,
+		"elect a leader, so several replicas can run with only one reconciling")
+	f.StringVar(&opts.namespace, "namespace", os.Getenv("POD_NAMESPACE"),
+		"namespace holding the gateways; defaults to $POD_NAMESPACE")
+	f.StringVar(&opts.gatewayImage, "gateway-image", os.Getenv("MAILOUT_GATEWAY_IMAGE"),
+		"image running the dataplane; defaults to $MAILOUT_GATEWAY_IMAGE")
+	f.BoolVar(&opts.developmentLog, "development-log", false, "human-readable, verbose logging")
+	return cmd
+}
+
+func runOperator(ctx context.Context, opts *operatorOptions) error {
+	ctrl.SetLogger(zap.New(zap.UseDevMode(opts.developmentLog)))
+	log := ctrl.Log.WithName("setup")
+
+	if opts.namespace == "" {
+		return fmt.Errorf("--namespace is required (or set POD_NAMESPACE)")
+	}
+	if opts.gatewayImage == "" {
+		return fmt.Errorf("--gateway-image is required (or set MAILOUT_GATEWAY_IMAGE)")
+	}
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	utilruntime.Must(certmanagerv1.AddToScheme(scheme))
+
+	restConfig := ctrl.GetConfigOrDie()
+
+	certManagerAvailable, err := controller.CertManagerInstalled(restConfig)
+	if err != nil {
+		return fmt.Errorf("detect cert-manager: %w", err)
+	}
+	log.Info("cert-manager detection", "available", certManagerAvailable)
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsserver.Options{BindAddress: opts.metricsAddr},
+		HealthProbeBindAddress: opts.probeAddr,
+		LeaderElection:         opts.leaderElect,
+		LeaderElectionID:       "mailout-operator.mailout.daly.nc",
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				// Accounts live anywhere, so their Secrets must be watched
+				// cluster-wide — but only the ones we wrote. Caching every
+				// Secret in the cluster would be both wasteful and a needless
+				// widening of what the operator holds in memory. Secrets the
+				// user brings (upstream credentials, certificates) are read
+				// uncached through the APIReader instead.
+				&corev1.Secret{}: {
+					Label: labels.SelectorFromSet(labels.Set{
+						"app.kubernetes.io/managed-by": "mailout-operator",
+					}),
+				},
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create manager: %w", err)
+	}
+
+	if err := (&controller.GatewayReconciler{
+		Client:               mgr.GetClient(),
+		Scheme:               mgr.GetScheme(),
+		APIReader:            mgr.GetAPIReader(),
+		OperatorNamespace:    opts.namespace,
+		GatewayImage:         opts.gatewayImage,
+		CertManagerAvailable: certManagerAvailable,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up gateway controller: %w", err)
+	}
+	if err := (&controller.AccountReconciler{
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		OperatorNamespace: opts.namespace,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up account controller: %w", err)
+	}
+
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return fmt.Errorf("add health check: %w", err)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		return fmt.Errorf("add ready check: %w", err)
+	}
+
+	log.Info("starting manager", "namespace", opts.namespace, "gatewayImage", opts.gatewayImage)
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		return fmt.Errorf("run manager: %w", err)
+	}
+	return nil
+}

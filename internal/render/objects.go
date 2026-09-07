@@ -277,9 +277,15 @@ func RestartHash(gw *v1alpha1.MailoutGateway, cfg *gateway.Config, accounts []Ac
 	return hex.EncodeToString(sum[:8])
 }
 
+// PasswordHashKey is where the account Secret keeps the bcrypt hash. The
+// gateway's configuration is rendered from it, so the hash lives next to the
+// cleartext it belongs to rather than being copied into a status field every
+// reader of the API could see.
+const PasswordHashKey = "passwordHash"
+
 // AccountSecret is what an application consumes: a basic-auth Secret carrying
 // the credentials and where to send. It is written entirely by the operator.
-func AccountSecret(account *v1alpha1.MailoutAccount, username, password string, endpoint Endpoint) *corev1.Secret {
+func AccountSecret(account *v1alpha1.MailoutAccount, username, password, passwordHash string, endpoint Endpoint) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      account.Spec.SecretRef.Name,
@@ -290,6 +296,7 @@ func AccountSecret(account *v1alpha1.MailoutAccount, username, password string, 
 		Data: map[string][]byte{
 			corev1.BasicAuthUsernameKey: []byte(username),
 			corev1.BasicAuthPasswordKey: []byte(password),
+			PasswordHashKey:             []byte(passwordHash),
 			"host":                      []byte(endpoint.Host),
 			"port":                      []byte(fmt.Sprint(endpoint.Port)),
 			"tls":                       []byte(endpoint.TLS),
