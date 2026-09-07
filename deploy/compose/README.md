@@ -34,4 +34,27 @@ swaks --to dest@example.test --from app@example.test \
       --auth-user app1 --auth-password demo-password
 ```
 
+## Virus scanning
+
+`clamav-milter` sits between the gateway and `clamd`, wired as
+`tcp://clamav-milter:7357` in `gateway.yaml`. The first start downloads the
+signature database (a few minutes); the gateway waits on clamd's healthcheck.
+
+A clean message comes out with the scanner's headers applied by the gateway:
+
+```
+X-Virus-Scanned: clamav-milter 1.5.4 at ...
+X-Virus-Status: Clean
+```
+
+An EICAR test file is refused at DATA time, with the scanner's own reason
+relayed to the client:
+
+```
+SMTP error 550: 5.7.1 Malware detected: Eicar-Signature
+```
+
+`failOpen` is off, so if the scanner is unreachable the gateway answers 451 and
+the client retries — mail never goes out unscanned.
+
 The same scenarios run unattended as Go tests: `make test-e2e`.

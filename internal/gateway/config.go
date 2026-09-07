@@ -40,7 +40,9 @@ type Config struct {
 	TLS       TLSConfig  `json:"tls"`
 	Upstream  Upstream   `json:"upstream"`
 	Accounts  []Account  `json:"accounts"`
-	Limits    Limits     `json:"limits"`
+	// Milters are applied in order, each seeing the previous one's changes.
+	Milters []Milter `json:"milters,omitempty"`
+	Limits  Limits   `json:"limits"`
 }
 
 // Listener is one socket the gateway accepts submissions on.
@@ -243,6 +245,11 @@ func (c *Config) Validate() error {
 		seenAccount[a.Username] = true
 		if a.PasswordHash == "" {
 			errs = append(errs, fmt.Sprintf("account %q: passwordHash is required", a.Username))
+		}
+	}
+	for i, m := range c.Milters {
+		if _, _, err := m.network(); err != nil {
+			errs = append(errs, fmt.Sprintf("milters[%d] (%s): %v", i, m.Name, err))
 		}
 	}
 	if len(errs) > 0 {

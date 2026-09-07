@@ -27,6 +27,7 @@ type snapshot struct {
 	accounts *accountStore
 	certs    *certStore
 	relay    *relayer
+	milters  *milterChain
 }
 
 func newSnapshot(cfg *Config, log *slog.Logger) (*snapshot, error) {
@@ -42,11 +43,16 @@ func newSnapshot(cfg *Config, log *slog.Logger) (*snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	milters, err := newMilterChain(cfg, log)
+	if err != nil {
+		return nil, err
+	}
 	return &snapshot{
 		config:   cfg,
 		accounts: newAccountStore(cfg.Accounts),
 		certs:    certs,
 		relay:    relay,
+		milters:  milters,
 	}, nil
 }
 
@@ -89,6 +95,7 @@ func (s *Server) Reload(cfg *Config) error {
 	s.log.Info("configuration loaded",
 		"accounts", len(snap.config.Accounts),
 		"certificates", len(snap.config.TLS.Certificates),
+		"milters", len(snap.config.Milters),
 		"upstream", snap.config.Upstream.Address())
 	return nil
 }
@@ -284,6 +291,21 @@ func (s *session) Data(r io.Reader) error {
 		Account: s.account.Username,
 	}
 
+	// Filters run before signing, so that DKIM covers the body the filters
+	// actually left behind.
+	if !s.snap.milters.empty() {
+		if err := s.snap.milters.run(context.Background(), msg, s.sessionInfo()); err != nil {
+			if errors.Is(err, errDiscard) {
+				s.server.log.Info("message discarded by a filter",
+					"account", msg.Account, "from", msg.From)
+				return nil
+			}
+			s.server.log.Info("message rejected by a filter",
+				"account", msg.Account, "from", msg.From, "err", err)
+			return err
+		}
+	}
+
 	// Deliberately not tied to the server's lifetime: a delivery in flight
 	// should finish rather than be cancelled by a shutdown. The relayer applies
 	// its own timeout, which is what bounds this call.
@@ -297,6 +319,29 @@ func (s *session) Data(r io.Reader) error {
 		"account", msg.Account, "from", msg.From, "rcpt", len(msg.To),
 		"bytes", len(msg.Data), "took", time.Since(start))
 	return nil
+}
+
+// sessionInfo describes the session to the milters, through the sendmail macros
+// they expect.
+func (s *session) sessionInfo() sessionInfo {
+	info := sessionInfo{
+		Hostname: s.conn.Hostname(),
+		MTAName:  s.snap.config.Hostname,
+	}
+	if s.account != nil {
+		info.AuthUser = s.account.Username
+	}
+	if c := s.conn.Conn(); c != nil {
+		if addr, ok := c.RemoteAddr().(*net.TCPAddr); ok {
+			info.RemoteIP = addr.IP.String()
+			info.RemotePort = uint16(addr.Port)
+		}
+	}
+	if state, ok := s.conn.TLSConnectionState(); ok {
+		info.TLSVersion = tls.VersionName(state.Version)
+		info.TLSCipher = tls.CipherSuiteName(state.CipherSuite)
+	}
+	return info
 }
 
 // prependReceived documents the hop, as any relay is expected to.

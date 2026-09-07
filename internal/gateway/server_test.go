@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"io"
-	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -116,7 +115,7 @@ const (
 	testCertName = "mail.gateway.test"
 )
 
-func newTestGateway(t *testing.T) *testGateway {
+func newTestGateway(t *testing.T, opts ...func(*Config)) *testGateway {
 	t.Helper()
 	upstream := newFakeUpstream(t)
 
@@ -147,7 +146,11 @@ func newTestGateway(t *testing.T) *testGateway {
 		},
 	}
 
-	srv, err := NewServer(cfg, slog.New(slog.DiscardHandler))
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	srv, err := NewServer(cfg, testLogger())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -336,5 +339,55 @@ func TestUpstreamRejectionIsPropagated(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "550") || !strings.Contains(err.Error(), "Rejected by policy") {
 		t.Fatalf("want the upstream 550, got %v", err)
+	}
+}
+
+// The filter chain must be wired into the session, not just unit-tested: a
+// message a filter rejects never reaches the upstream.
+func TestFilteredMessageIsRejectedBeforeRelaying(t *testing.T) {
+	address := startTestMilter(t, &testMilterBackend{rejectOn: eicarPattern})
+	gw := newTestGateway(t, func(cfg *Config) {
+		cfg.Milters = []Milter{{Name: "scanner", Address: address}}
+	})
+
+	c := gw.dialSubmission(t)
+	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
+		t.Fatalf("AUTH: %v", err)
+	}
+	err := c.SendMail("app@example.test", []string{"dest@example.test"},
+		strings.NewReader("Subject: infected\r\n\r\n"+eicarPattern+"\r\n"))
+	if err == nil {
+		t.Fatal("expected the infected message to be rejected")
+	}
+	if !strings.Contains(err.Error(), "554") || !strings.Contains(err.Error(), "Malware found") {
+		t.Fatalf("want the filter's 554, got %v", err)
+	}
+	if len(gw.upstream.received()) != 0 {
+		t.Fatal("an infected message reached the upstream")
+	}
+}
+
+// A clean message goes through the same chain and comes out with the filter's
+// header added.
+func TestFilteredMessageKeepsFilterHeader(t *testing.T) {
+	address := startTestMilter(t, &testMilterBackend{addHeader: "clean"})
+	gw := newTestGateway(t, func(cfg *Config) {
+		cfg.Milters = []Milter{{Name: "scanner", Address: address}}
+	})
+
+	c := gw.dialSubmission(t)
+	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
+		t.Fatalf("AUTH: %v", err)
+	}
+	if err := c.SendMail("app@example.test", []string{"dest@example.test"},
+		strings.NewReader("Subject: fine\r\n\r\nhello\r\n")); err != nil {
+		t.Fatalf("SendMail: %v", err)
+	}
+	msgs := gw.upstream.received()
+	if len(msgs) != 1 {
+		t.Fatalf("upstream got %d messages", len(msgs))
+	}
+	if !strings.Contains(string(msgs[0].Data), "X-Test-Filter: clean") {
+		t.Fatalf("filter header missing:\n%s", msgs[0].Data)
 	}
 }

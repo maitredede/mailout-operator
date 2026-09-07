@@ -27,6 +27,8 @@ services:
     depends_on:
       mailpit:
         condition: service_started
+      clamav-milter:
+        condition: service_started
 
   # Stands in for the target SMTP server. Its HTTP API is the oracle the tests
   # assert against.
@@ -37,3 +39,31 @@ services:
       MP_SMTP_AUTH_ALLOW_INSECURE: "true"
     ports:
       - "18025:8025"
+
+  # Virus scanner. The first start downloads the signature database, which takes
+  # a few minutes; the healthcheck is what the milter waits on.
+  clamav:
+    image: clamav/clamav:1.5.4
+    environment:
+      CLAMAV_NO_MILTERD: "true"
+    volumes:
+      - clamav-db:/var/lib/clamav
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 60s
+
+  # Bridges the gateway's milter protocol to clamd.
+  clamav-milter:
+    image: clamav/clamav:1.5.4
+    entrypoint: ["clamav-milter", "--config-file=/etc/clamav/clamav-milter.conf"]
+    volumes:
+      - ./clamav-milter.conf:/etc/clamav/clamav-milter.conf:ro
+    depends_on:
+      clamav:
+        condition: service_healthy
+
+volumes:
+  clamav-db:

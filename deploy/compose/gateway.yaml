@@ -32,6 +32,13 @@ accounts:
   - username: app1
     passwordHash: "$2a$12$C7yTXw50xW.ESgrG6t3Ip.Nm0epgrTWQfX88LiB7PZc/SqmfLmLki"
 
+milters:
+  - name: clamav
+    address: tcp://clamav-milter:7357
+    timeout: 30s
+    # failOpen stays off: if the scanner is down, mail waits rather than going
+    # out unscanned.
+
 limits:
   maxMessageBytes: 10485760
   maxRecipients: 20
