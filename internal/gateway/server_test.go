@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emersion/go-msgauth/dkim"
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 	"github.com/maitredede/mailout-operator/internal/pki"
@@ -389,5 +391,55 @@ func TestFilteredMessageKeepsFilterHeader(t *testing.T) {
 	}
 	if !strings.Contains(string(msgs[0].Data), "X-Test-Filter: clean") {
 		t.Fatalf("filter header missing:\n%s", msgs[0].Data)
+	}
+}
+
+// An account may opt out of one of the gateway's filters; the others still run.
+func TestAccountCanDisableAFilter(t *testing.T) {
+	rejecting := startTestMilter(t, &testMilterBackend{rejectOn: "hello"})
+	gw := newTestGateway(t, func(cfg *Config) {
+		cfg.Milters = []Milter{{Name: "picky", Address: rejecting}}
+		cfg.Accounts[0].DisableMilters = []string{"picky"}
+	})
+
+	c := gw.dialSubmission(t)
+	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
+		t.Fatalf("AUTH: %v", err)
+	}
+	if err := c.SendMail("app@example.test", []string{"dest@example.test"},
+		strings.NewReader("Subject: fine\r\n\r\nhello\r\n")); err != nil {
+		t.Fatalf("the disabled filter still rejected the message: %v", err)
+	}
+	if len(gw.upstream.received()) != 1 {
+		t.Fatal("message not relayed")
+	}
+}
+
+// An account's own DKIM key overrides the gateway's.
+func TestAccountDKIMOverridesTheGatewayKey(t *testing.T) {
+	gatewayKey, _ := dkimTestKey(t, "rsa", "example.test", "gw")
+	accountKey, accountLookup := dkimTestKey(t, "rsa", "example.test", "acct")
+	gw := newTestGateway(t, func(cfg *Config) {
+		cfg.DKIM = []DKIMKey{gatewayKey}
+		cfg.Accounts[0].DKIM = []DKIMKey{accountKey}
+	})
+
+	c := gw.dialSubmission(t)
+	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
+		t.Fatalf("AUTH: %v", err)
+	}
+	if err := c.SendMail("app@example.test", []string{"dest@example.test"},
+		strings.NewReader("From: app@example.test\r\nSubject: signed\r\n\r\nbody\r\n")); err != nil {
+		t.Fatalf("SendMail: %v", err)
+	}
+	msgs := gw.upstream.received()
+	if len(msgs) != 1 {
+		t.Fatalf("upstream got %d messages", len(msgs))
+	}
+	// Only the account's selector verifies, which proves its key was used.
+	verifications, err := dkim.VerifyWithOptions(bytes.NewReader(msgs[0].Data),
+		&dkim.VerifyOptions{LookupTXT: accountLookup})
+	if err != nil || len(verifications) != 1 || verifications[0].Err != nil {
+		t.Fatalf("account key did not sign the message: %v %+v", err, verifications)
 	}
 }

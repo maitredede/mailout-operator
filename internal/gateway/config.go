@@ -101,6 +101,14 @@ type Account struct {
 	// dataplane.
 	PasswordHash string `json:"passwordHash"`
 	Disabled     bool   `json:"disabled,omitempty"`
+	// DKIM, when set, replaces the gateway's signing keys for this account.
+	// +optional
+	DKIM []DKIMKey `json:"dkim,omitempty"`
+	// DisableMilters names gateway filters to skip for this account, by name.
+	// Filters can only be switched off, never added: an account must not be
+	// able to route its mail through a filter of its own choosing.
+	// +optional
+	DisableMilters []string `json:"disableMilters,omitempty"`
 }
 
 // Limits bounds what a session may do. Zero values fall back to defaults.

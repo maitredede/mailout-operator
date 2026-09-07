@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -16,10 +17,14 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// File reads the configuration from a YAML file and reloads it when the file
-// changes. It watches the parent directory rather than the file itself, because
+// File reads the configuration from a YAML file and reloads it when anything it
+// depends on changes. It watches parent directories rather than files, because
 // that is the only thing that works for a Kubernetes projected volume, where an
 // update replaces a symlink instead of writing in place.
+//
+// The directories watched are the config file's own plus those of every file it
+// references — certificates and DKIM keys. That is what makes a cert-manager
+// renewal land in a running gateway without the operator touching the pod.
 type File struct {
 	path string
 	log  *slog.Logger
@@ -48,7 +53,35 @@ func (f *File) Load(context.Context) (*gateway.Config, error) {
 	return cfg, nil
 }
 
-// Watch reloads on every change to the file's directory.
+// referencedDirs returns every directory that must be watched for a given
+// configuration: the config file's own, plus those holding the certificates and
+// DKIM keys it points at.
+func (f *File) referencedDirs(cfg *gateway.Config) []string {
+	dirs := map[string]bool{filepath.Dir(f.path): true}
+	if cfg != nil {
+		for _, cert := range cfg.TLS.Certificates {
+			for _, path := range []string{cert.CertFile, cert.KeyFile} {
+				if path != "" {
+					dirs[filepath.Dir(path)] = true
+				}
+			}
+		}
+		for _, key := range cfg.DKIM {
+			if key.PrivateKeyFile != "" {
+				dirs[filepath.Dir(key.PrivateKeyFile)] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(dirs))
+	for dir := range dirs {
+		out = append(out, dir)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Watch reloads on every change to the configuration or to the files it
+// references.
 func (f *File) Watch(ctx context.Context, onChange func(*gateway.Config)) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -56,10 +89,29 @@ func (f *File) Watch(ctx context.Context, onChange func(*gateway.Config)) error 
 	}
 	defer watcher.Close()
 
-	dir := filepath.Dir(f.path)
-	if err := watcher.Add(dir); err != nil {
-		return fmt.Errorf("watch %s: %w", dir, err)
+	// The set of directories depends on the configuration itself, so it is
+	// recomputed after every successful reload.
+	watched := map[string]bool{}
+	syncWatches := func(cfg *gateway.Config) {
+		for _, dir := range f.referencedDirs(cfg) {
+			if watched[dir] {
+				continue
+			}
+			if err := watcher.Add(dir); err != nil {
+				f.log.Warn("cannot watch directory", "dir", dir, "err", err)
+				continue
+			}
+			watched[dir] = true
+			f.log.Debug("watching directory", "dir", dir)
+		}
 	}
+	// Watch what the current configuration needs; a config that fails to load
+	// still leaves the config file's own directory watched.
+	current, err := f.Load(ctx)
+	if err != nil {
+		f.log.Warn("initial watch setup: config unreadable", "err", err)
+	}
+	syncWatches(current)
 
 	var timer *time.Timer
 	var fire <-chan time.Time
@@ -90,6 +142,7 @@ func (f *File) Watch(ctx context.Context, onChange func(*gateway.Config)) error 
 				f.log.Warn("reload skipped", "err", err)
 				continue
 			}
+			syncWatches(cfg)
 			onChange(cfg)
 		}
 	}

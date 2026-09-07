@@ -12,7 +12,7 @@ all: generate manifests build test
 
 .PHONY: generate
 generate: ## deepcopy funcs
-	go tool controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/...
+	go tool controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/... paths=./internal/certmanager/...
 
 .PHONY: manifests
 manifests: ## CRDs, RBAC, webhook manifests

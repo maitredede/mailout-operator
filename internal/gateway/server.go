@@ -29,6 +29,15 @@ type snapshot struct {
 	relay    *relayer
 	milters  *milterChain
 	dkim     *dkimSigner
+	// policies holds the per-account filter chain and signer. An account with
+	// no override shares the gateway's own.
+	policies map[string]accountPolicy
+}
+
+// accountPolicy is what applies to one account's messages.
+type accountPolicy struct {
+	milters *milterChain
+	dkim    *dkimSigner
 }
 
 func newSnapshot(cfg *Config, log *slog.Logger) (*snapshot, error) {
@@ -52,14 +61,39 @@ func newSnapshot(cfg *Config, log *slog.Logger) (*snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &snapshot{
+	snap := &snapshot{
 		config:   cfg,
 		accounts: newAccountStore(cfg.Accounts),
 		certs:    certs,
 		relay:    relay,
 		milters:  milters,
 		dkim:     signer,
-	}, nil
+		policies: make(map[string]accountPolicy, len(cfg.Accounts)),
+	}
+	for _, acct := range cfg.Accounts {
+		policy := accountPolicy{milters: milters, dkim: signer}
+		if len(acct.DisableMilters) > 0 {
+			policy.milters = milters.without(acct.DisableMilters)
+		}
+		if len(acct.DKIM) > 0 {
+			accountSigner, err := newDKIMSigner(acct.DKIM, log)
+			if err != nil {
+				return nil, fmt.Errorf("account %s: %w", acct.Username, err)
+			}
+			policy.dkim = accountSigner
+		}
+		snap.policies[acct.Username] = policy
+	}
+	return snap, nil
+}
+
+// policyFor returns what applies to an account, falling back to the gateway's
+// own filters and keys.
+func (s *snapshot) policyFor(username string) accountPolicy {
+	if policy, ok := s.policies[username]; ok {
+		return policy
+	}
+	return accountPolicy{milters: s.milters, dkim: s.dkim}
 }
 
 // Server is the SMTP dataplane. Its configuration can be replaced at runtime
@@ -298,10 +332,12 @@ func (s *session) Data(r io.Reader) error {
 		Account: s.account.Username,
 	}
 
+	policy := s.snap.policyFor(s.account.Username)
+
 	// Filters run before signing, so that DKIM covers the body the filters
 	// actually left behind.
-	if !s.snap.milters.empty() {
-		if err := s.snap.milters.run(context.Background(), msg, s.sessionInfo()); err != nil {
+	if !policy.milters.empty() {
+		if err := policy.milters.run(context.Background(), msg, s.sessionInfo()); err != nil {
 			if errors.Is(err, errDiscard) {
 				s.server.log.Info("message discarded by a filter",
 					"account", msg.Account, "from", msg.From)
@@ -314,8 +350,8 @@ func (s *session) Data(r io.Reader) error {
 	}
 
 	// Signed last, so the signature covers what the filters left behind.
-	if !s.snap.dkim.empty() {
-		if err := s.snap.dkim.sign(msg); err != nil {
+	if !policy.dkim.empty() {
+		if err := policy.dkim.sign(msg); err != nil {
 			s.server.log.Error("DKIM signing failed", "account", msg.Account, "err", err)
 			return &smtp.SMTPError{
 				Code:         451,
