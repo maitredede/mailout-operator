@@ -1,0 +1,37 @@
+# Standalone gateway configuration, as consumed by `mailout gateway -c`.
+# In a cluster the operator renders the same shape from the CRDs.
+hostname: mailout.test
+
+listeners:
+  - name: submission
+    addr: ":587"
+    mode: starttls
+  - name: smtps
+    addr: ":465"
+    mode: implicit
+
+tls:
+  # Two certificates, so SNI can actually be observed: connecting with
+  # servername mailout.test and alt.mailout.test serves different leaves.
+  certificates:
+    - name: gateway
+      certFile: /etc/mailout/certs/gateway.crt
+      keyFile: /etc/mailout/certs/gateway.key
+    - name: gateway-alt
+      certFile: /etc/mailout/certs/gateway-alt.crt
+      keyFile: /etc/mailout/certs/gateway-alt.key
+  defaultCertificate: gateway
+
+upstream:
+  host: mailpit
+  port: 1025
+  tls: none
+
+accounts:
+  # password: demo-password (see deploy/compose/README.md)
+  - username: app1
+    passwordHash: "$2a$12$C7yTXw50xW.ESgrG6t3Ip.Nm0epgrTWQfX88LiB7PZc/SqmfLmLki"
+
+limits:
+  maxMessageBytes: 10485760
+  maxRecipients: 20

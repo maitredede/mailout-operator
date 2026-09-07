@@ -1,0 +1,39 @@
+# Local validation of the mailout dataplane, without Kubernetes.
+#
+#   make compose-up
+#   # then: swaks --to dest@example.test --from app@example.test \
+#   #         --server localhost:1587 --tls --auth-user app1 --auth-password demo-password
+#   # and read the result at http://localhost:18025
+#
+# Certificates come from `make compose-certs` and are signed by a throwaway CA
+# (deploy/compose/certs/ca.crt) — pass it to your client, or disable
+# verification.
+
+name: mailout
+
+services:
+  gateway:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["gateway", "-c", "/etc/mailout/gateway.yaml", "--log-level=debug"]
+    ports:
+      # High host ports, to avoid colliding with a local MTA or another stack.
+      - "1587:587"
+      - "1465:465"
+    volumes:
+      - ./gateway.yaml:/etc/mailout/gateway.yaml:ro
+      - ./certs:/etc/mailout/certs:ro
+    depends_on:
+      mailpit:
+        condition: service_started
+
+  # Stands in for the target SMTP server. Its HTTP API is the oracle the tests
+  # assert against.
+  mailpit:
+    image: axllent/mailpit:v1.31.1
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    ports:
+      - "18025:8025"
