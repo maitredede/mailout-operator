@@ -77,9 +77,17 @@ The decisions worth knowing about:
 - **One tenant's mistake stays its own.** An account that cannot be served is
   dropped from the configuration with the reason in its status; the relay keeps
   running for everyone else.
+- **A quota that is not being counted stops the mail.** Rate limiting is
+  fail-closed: when the shared store is unreachable the gateway answers `451`
+  rather than letting mail through uncounted. That makes the store part of the
+  critical path, deliberately — a quota that lapses whenever its store hiccups
+  is not a quota. Declare none and nothing is counted.
 - **Adding an account does not restart anything.** The gateway reloads its
   accounts, keys and certificates from disk; only a change of listener or of
   mounted Secret rolls the pods.
+- **The operator runs two replicas.** One reconciles, the other stands by. It is
+  the webhook that gains most: its `failurePolicy` is `Fail`, so with a single
+  replica every write to a CRD is refused for the length of a rollout.
 
 ## Install
 
@@ -121,6 +129,11 @@ spec:
   milters:
     - name: clamav
       address: tcp://clamav-milter.security.svc:7357
+  rateLimit:                # optional; see Quotas below
+    store:
+      addresses: [valkey.mailout-system.svc:6379]
+    messagesPerMinute: 60
+    recipientsPerMinute: 300
 ```
 
 ```yaml
@@ -155,6 +168,90 @@ To generate a DKIM key and the TXT record that publishes it:
 mailout dkim-key --domain example.com --selector mail -o dkim.key
 ```
 
+## Quotas
+
+`spec.rateLimit` caps what each account may send, per minute, counted in a store
+shared by every replica of the gateway — an in-process counter would cap each pod
+separately, and therefore cap nothing.
+
+The quota is the gateway's, the same for all its accounts. It is deliberately not
+overridable per account: a `MailoutAccount` lives in its tenant's own namespace,
+so an override there would be the tenant setting its own quota. An account that
+needs a different limit belongs on a different gateway.
+
+The store is **referenced, never deployed**: it is infrastructure with its own
+lifecycle, backups and upgrades. Point it at a Valkey (or any Redis-compatible
+server) you run yourself. For high availability, one primary and two replicas
+behind Sentinel:
+
+```yaml
+spec:
+  rateLimit:
+    store:
+      addresses:            # the Sentinels, not the data nodes
+        - valkey-sentinel-0.valkey.mailout-system.svc:26379
+        - valkey-sentinel-1.valkey.mailout-system.svc:26379
+        - valkey-sentinel-2.valkey.mailout-system.svc:26379
+      masterName: mailout   # what selects Sentinel
+      authSecretRef:
+        name: valkey-credentials
+      sentinelAuthSecretRef:
+        name: valkey-sentinel-credentials
+    messagesPerMinute: 60
+    recipientsPerMinute: 300
+```
+
+One address is a standalone server; several addresses **without** `masterName`
+are treated as a Redis Cluster. That is the trap worth knowing: a primary and its
+replicas listed without a `masterName` would be taken for a cluster. The webhook
+warns, and the gateway logs the mode it deduced at startup:
+
+```
+level=INFO msg="rate limiting enabled" mode=sentinel addresses=3 messagesPerMinute=60
+```
+
+What to expect at the edges:
+
+- **Over quota is `452 4.2.2`** — a temporary refusal, so a well-behaved client
+  holds the message and retries.
+- **Store unreachable is `451 4.3.2`** — fail-closed, as above.
+- **The window is fixed, not sliding.** An account can spend its quota in the
+  last second of one minute and again in the first second of the next, so up to
+  twice the limit can go out within one window's span. That is the price of one
+  key per account and a single-key operation, which is what keeps this working
+  unchanged on a cluster.
+- **Messages and recipients are counted separately**, because a thousand
+  messages to one recipient and one message to a thousand recipients are the same
+  amount of mail and only the second is caught by a message count. Omit either to
+  leave that dimension uncounted.
+
+## Metrics
+
+The dataplane serves Prometheus metrics on port 9090 (`/metrics`), on a
+`<gateway>-metrics` Service of its own — never on the SMTP Service, which can be
+a `LoadBalancer`. A `ServiceMonitor` is created too, but only if
+prometheus-operator's CRD is served by the cluster.
+
+| Metric | What it tells you |
+|---|---|
+| `mailout_messages_total{account,result}` | `relayed`, `rejected` (5xx, permanent), `deferred` (4xx, retry expected), `discarded` (swallowed by a filter) |
+| `mailout_message_bytes_total{account}` | Volume relayed, after filtering and signing |
+| `mailout_auth_failures_total{account}` | Refused logins; attempts on unknown usernames land under `<unknown>` |
+| `mailout_milter_decisions_total{milter,decision}` | `accept`, `reject`, `discard`, `unavailable` — the last one counted whether the message then went through or not |
+| `mailout_dkim_signatures_total{domain,result}` | `signed`, `refused` (the account may not send from that domain), `failed` |
+| `mailout_ratelimit_decisions_total{account,decision}` | `allowed`, `denied`, `error` |
+| `mailout_upstream_delivery_seconds` | What the submitting application waits on, delivery being synchronous |
+| `mailout_config_reloads_total{result}` | A failed reload keeps the previous configuration; this is the only sign the relay is running on something stale |
+| `mailout_accounts`, `mailout_accounts_rejected` | Accounts served, and accounts dropped because their own settings are unusable |
+
+The three worth alerting on: `result="deferred"` rising (the upstream is in
+trouble), `decision="error"` on the rate limiter (the quota store is, and it is
+stopping mail), and `mailout_config_reloads_total{result="failure"}` at all.
+
+Every label is bounded by configuration, never by traffic — which is why an
+authentication failure on a username no account has is reported as `<unknown>`
+rather than under the name that was tried.
+
 ## Try it without a cluster
 
 The dataplane has no dependency on the Kubernetes API: it reads a YAML file, and
@@ -183,16 +280,17 @@ dependencies, so there is nothing to install: `make generate manifests` works
 from a bare checkout.
 
 `make test-cluster` is the one that catches what the others cannot. It starts a
-real k3s in a container and runs two scenarios: the operator reconciling
-in-process, to check that the pods it deploys actually relay mail; and the
-operator deployed from `config/default` with cert-manager, to check that the
-manifests in this repository work — the webhook's CA injection and the
-gateway's issued listener certificate included. A rendered manifest can be
-perfectly valid and still produce a container that will not start.
+real k3s in a container and runs three scenarios: the operator reconciling
+in-process, to check that the pods it deploys actually relay mail and serve
+their metrics; the operator deployed from `config/default` with cert-manager, to
+check that the manifests in this repository work — the webhook's CA injection,
+the gateway's issued listener certificate, and two operator replicas with a
+single leader; and an adversarial one, where a tenant tries to have another
+tenant's domain signed. A rendered manifest can be perfectly valid and still
+produce a container that will not start.
 
 ## Not there yet
 
-Prometheus metrics for the dataplane, per-account rate limiting,
 `ReferenceGrant`-style per-account delegation, and a spool with bounces for
 clients that cannot retry.
 

@@ -13,6 +13,7 @@ make compose-down
 | Submission (STARTTLS) | `localhost:1587` | AUTH is only offered once TLS is up |
 | Submissions (implicit TLS) | `localhost:1465` | |
 | Mailpit UI | http://localhost:18025 | where relayed mail lands |
+| Metrics | http://localhost:19090/metrics | Prometheus exposition |
 
 Account: `app1` / `demo-password`.
 
@@ -32,6 +33,18 @@ Sending a message, with the CA trusted:
 swaks --to dest@example.test --from app@example.test \
       --server localhost:1587 --tls --tls-ca-path deploy/compose/certs/ca.crt \
       --auth-user app1 --auth-password demo-password
+```
+
+## Metrics
+
+The dataplane counts what it does, and the counters are the quickest way to see
+what happened without reading the logs:
+
+```bash
+curl -s localhost:19090/metrics | grep '^mailout_'
+# mailout_messages_total{account="app1",result="relayed"} 3
+# mailout_messages_total{account="app1",result="rejected"} 1   # the EICAR one
+# mailout_dkim_signatures_total{domain="example.test",result="signed"} 3
 ```
 
 ## Virus scanning
