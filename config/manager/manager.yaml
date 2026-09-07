@@ -15,9 +15,11 @@ metadata:
     app.kubernetes.io/name: mailout
     app.kubernetes.io/component: operator
 spec:
-  # Raise to 2 for high availability: leader election is enabled below, so only
-  # one replica reconciles and the other takes over within seconds.
-  replicas: 1
+  # Two replicas, one of which reconciles: leader election is enabled below, so
+  # the standby takes over within the lease duration instead of waiting for a
+  # node to be replaced. It is the rollout and the node drain this covers, not
+  # throughput — a second active reconciler would fight the first.
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: mailout
@@ -30,6 +32,20 @@ spec:
     spec:
       serviceAccountName: mailout-operator
       terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          # Preferred, not required: a single-node cluster is a perfectly normal
+          # place to run this, and a hard rule would leave the second replica
+          # Pending forever there — trading the availability it was meant to buy
+          # for a permanently degraded Deployment.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: mailout
+                    app.kubernetes.io/component: operator
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -87,6 +103,24 @@ spec:
         - name: webhook-certs
           secret:
             secretName: mailout-webhook-tls
+---
+# One replica must stay up through a voluntary disruption — a node drain, a
+# cluster upgrade. Without this, both replicas can be evicted at once and the
+# relay is left with nobody to reconcile it.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mailout-operator
+  namespace: mailout-system
+  labels:
+    app.kubernetes.io/name: mailout
+    app.kubernetes.io/component: operator
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mailout
+      app.kubernetes.io/component: operator
 ---
 apiVersion: v1
 kind: ServiceAccount

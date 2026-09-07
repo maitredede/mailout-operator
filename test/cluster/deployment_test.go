@@ -14,12 +14,45 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
 	certmanagerv1 "github.com/maitredede/mailout-operator/internal/certmanager/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// assertSingleLeader checks that leader election settled on exactly one holder.
+func assertSingleLeader(t *testing.T, cl *cluster, timeout time.Duration) {
+	t.Helper()
+	const leaseName = "mailout-operator.mailout.daly.nc"
+	deadline := time.Now().Add(timeout)
+	var lease coordinationv1.Lease
+	key := client.ObjectKey{Namespace: operatorNamespace, Name: leaseName}
+	for time.Now().Before(deadline) {
+		if err := cl.Client.Get(t.Context(), key, &lease); err == nil &&
+			lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "" {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity == "" {
+		t.Fatalf("no leader held %s within %s: %+v", leaseName, timeout, lease.Spec)
+	}
+
+	var leases coordinationv1.LeaseList
+	if err := cl.Client.List(t.Context(), &leases, client.InNamespace(operatorNamespace)); err != nil {
+		t.Fatalf("list leases: %v", err)
+	}
+	if len(leases.Items) != 1 {
+		names := make([]string, 0, len(leases.Items))
+		for _, l := range leases.Items {
+			names = append(names, l.Name)
+		}
+		t.Fatalf("expected one lease in %s, got %v", operatorNamespace, names)
+	}
+	t.Logf("leader election settled on %s", *lease.Spec.HolderIdentity)
+}
 
 // TestDeployedOperatorWithCertManager exercises the deployment rather than the
 // behaviour: the operator runs as a pod from config/default, its webhook serves
@@ -49,6 +82,14 @@ func TestDeployedOperatorWithCertManager(t *testing.T) {
 	t.Log("deploying the operator from config/default")
 	applyYAML(t, c, kustomizeBuild(t, "config/default"))
 	cl.waitForDeploymentsAvailable(t, operatorNamespace, []string{"mailout-operator"}, 3*time.Minute)
+
+	// High availability is not a manifest that says replicas: 2, it is two pods
+	// actually running with exactly one of them reconciling. Both halves are
+	// worth asserting: a required anti-affinity rule would leave the second pod
+	// Pending on this single-node cluster, and a leader election that failed to
+	// engage would have both of them writing to the same objects.
+	cl.waitForReadyReplicas(t, operatorNamespace, "mailout-operator", 2, 3*time.Minute)
+	assertSingleLeader(t, cl, 2*time.Minute)
 
 	// The webhook must actually answer before anything is created: its
 	// failurePolicy is Fail, so an unreachable webhook rejects every write. That

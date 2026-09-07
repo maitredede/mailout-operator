@@ -177,3 +177,25 @@ func (cl *cluster) waitForDeploymentsAvailable(t *testing.T, namespace string, n
 	t.Fatalf("these Deployments in %s never became available within %s: %s",
 		namespace, timeout, strings.Join(pending, ", "))
 }
+
+// waitForReadyReplicas waits until a Deployment has the expected number of
+// ready pods. Distinct from waitForDeploymentsAvailable, which is satisfied by
+// a single replica: for the operator's high availability, one ready pod is
+// exactly the failure being looked for.
+func (cl *cluster) waitForReadyReplicas(t *testing.T, namespace, name string, want int32, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last int32
+	for time.Now().Before(deadline) {
+		deployment, err := cl.Clientset.AppsV1().Deployments(namespace).
+			Get(t.Context(), name, metav1.GetOptions{})
+		if err == nil {
+			last = deployment.Status.ReadyReplicas
+			if last >= want {
+				return
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("%s/%s had %d ready replicas after %s, want %d", namespace, name, last, timeout, want)
+}
