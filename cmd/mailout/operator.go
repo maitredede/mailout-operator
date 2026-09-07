@@ -10,6 +10,7 @@ import (
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
 	certmanagerv1 "github.com/maitredede/mailout-operator/internal/certmanager/v1"
 	"github.com/maitredede/mailout-operator/internal/controller"
+	monitoringv1 "github.com/maitredede/mailout-operator/internal/monitoring/v1"
 	mailoutwebhook "github.com/maitredede/mailout-operator/internal/webhook/v1alpha1"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
@@ -84,6 +85,7 @@ func runOperator(ctx context.Context, opts *operatorOptions) error {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 	utilruntime.Must(certmanagerv1.AddToScheme(scheme))
+	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 
 	restConfig := ctrl.GetConfigOrDie()
 
@@ -92,6 +94,12 @@ func runOperator(ctx context.Context, opts *operatorOptions) error {
 		return fmt.Errorf("detect cert-manager: %w", err)
 	}
 	log.Info("cert-manager detection", "available", certManagerAvailable)
+
+	prometheusOperatorAvailable, err := controller.PrometheusOperatorInstalled(restConfig)
+	if err != nil {
+		return fmt.Errorf("detect prometheus-operator: %w", err)
+	}
+	log.Info("prometheus-operator detection", "available", prometheusOperatorAvailable)
 
 	options := ctrl.Options{
 		Scheme:                 scheme,
@@ -134,6 +142,8 @@ func runOperator(ctx context.Context, opts *operatorOptions) error {
 		OperatorNamespace:    opts.namespace,
 		GatewayImage:         opts.gatewayImage,
 		CertManagerAvailable: certManagerAvailable,
+
+		PrometheusOperatorAvailable: prometheusOperatorAvailable,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up gateway controller: %w", err)
 	}

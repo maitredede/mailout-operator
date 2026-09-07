@@ -86,7 +86,8 @@ func TestGatewayCreatesItsWorkload(t *testing.T) {
 	if container.Image != testGatewayImage {
 		t.Fatalf("image = %q", container.Image)
 	}
-	if len(container.Ports) != 2 {
+	// Two listeners plus the metrics port.
+	if len(container.Ports) != 3 {
 		t.Fatalf("ports = %+v", container.Ports)
 	}
 
@@ -119,6 +120,38 @@ func TestGatewayCreatesItsWorkload(t *testing.T) {
 	}
 	if len(fresh.Status.Listeners) != 2 || fresh.Status.ServiceName != "workload" {
 		t.Fatalf("status = %+v", fresh.Status)
+	}
+}
+
+// The metrics Service is created whether or not prometheus-operator is there:
+// it costs nothing, and it is what any other scraper points at. Only the
+// ServiceMonitor depends on the CRD being served — and this cluster has none,
+// so reconciling must not so much as attempt one.
+func TestGatewayCreatesMetricsServiceWithoutPrometheusOperator(t *testing.T) {
+	c := newTestClient(t)
+	ensureOperatorNamespace(t, c)
+	gw := newGateway(t, c, "metrics")
+
+	r := newGatewayReconciler(c)
+	if r.PrometheusOperatorAvailable {
+		t.Fatal("the test reconciler should not claim prometheus-operator")
+	}
+	reconcileGateway(t, r, gw)
+
+	var svc corev1.Service
+	key := client.ObjectKey{Namespace: operatorNamespace, Name: render.MetricsServiceName("metrics")}
+	if err := c.Get(t.Context(), key, &svc); err != nil {
+		t.Fatalf("get metrics service: %v", err)
+	}
+	if svc.Spec.Type != corev1.ServiceTypeClusterIP {
+		t.Errorf("metrics Service type = %s, want ClusterIP", svc.Spec.Type)
+	}
+	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Name != render.MetricsPortName {
+		t.Fatalf("ports = %+v", svc.Spec.Ports)
+	}
+	// Owned by the gateway, so deleting the gateway takes it with it.
+	if len(svc.OwnerReferences) != 1 || svc.OwnerReferences[0].Name != gw.Name {
+		t.Errorf("owner references = %+v", svc.OwnerReferences)
 	}
 }
 

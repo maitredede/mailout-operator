@@ -11,6 +11,7 @@ import (
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
 	certmanagerv1 "github.com/maitredede/mailout-operator/internal/certmanager/v1"
 	"github.com/maitredede/mailout-operator/internal/gateway"
+	monitoringv1 "github.com/maitredede/mailout-operator/internal/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,6 +29,16 @@ const (
 	// belongs to, for objects the gateway controller does not own.
 	LabelGatewayName      = "mailout.daly.nc/gateway"
 	LabelGatewayNamespace = "mailout.daly.nc/gateway-namespace"
+
+	// MetricsServiceSuffix is appended to the gateway name for the Service
+	// carrying the Prometheus endpoint. It is a Service of its own rather than
+	// another port on the SMTP one: that Service can be a LoadBalancer, and
+	// putting the metrics on it would publish the relay's internals wherever it
+	// is exposed.
+	MetricsServiceSuffix = "-metrics"
+	// LabelService distinguishes the gateway's Services from one another, so
+	// the ServiceMonitor selects the metrics one and nothing else.
+	LabelService = "mailout.daly.nc/service"
 
 	// RestartHashAnnotation carries a digest of the parts of the configuration
 	// a running gateway cannot pick up by itself. The rest — accounts, keys,
@@ -48,6 +59,19 @@ const (
 	// failure only a real cluster reveals.
 	secretFileMode = int32(0o440)
 )
+
+// The Prometheus endpoint. The port is fixed rather than configurable: it is
+// reached through the Service by name, so there is nothing to gain from moving
+// it, and one more knob is one more thing that can disagree with the
+// ServiceMonitor.
+const (
+	MetricsPortName = "metrics"
+	MetricsPort     = int32(9090)
+	MetricsPath     = "/metrics"
+)
+
+// MetricsServiceName is the Service carrying the Prometheus endpoint.
+func MetricsServiceName(gatewayName string) string { return gatewayName + MetricsServiceSuffix }
 
 // ConfigSecretName is the Secret holding the rendered configuration.
 func ConfigSecretName(gatewayName string) string { return gatewayName + ConfigSecretSuffix }
@@ -154,6 +178,66 @@ func serviceType(gw *v1alpha1.MailoutGateway) corev1.ServiceType {
 	return corev1.ServiceTypeClusterIP
 }
 
+// MetricsService exposes the dataplane's Prometheus endpoint. Always
+// ClusterIP, whatever the SMTP Service is: metrics are for the cluster's own
+// monitoring, never for anything outside it.
+func MetricsService(gw *v1alpha1.MailoutGateway) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      MetricsServiceName(gw.Name),
+			Namespace: gw.Namespace,
+			Labels:    MetricsServiceLabels(gw.Name),
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: SelectorLabels(gw.Name),
+			Type:     corev1.ServiceTypeClusterIP,
+			Ports: []corev1.ServicePort{{
+				Name:       MetricsPortName,
+				Port:       MetricsPort,
+				TargetPort: intstr.FromString(MetricsPortName),
+				Protocol:   corev1.ProtocolTCP,
+			}},
+		},
+	}
+}
+
+// MetricsServiceLabels mark the metrics Service, and are what the ServiceMonitor
+// selects on.
+func MetricsServiceLabels(gatewayName string) map[string]string {
+	labels := Labels(gatewayName)
+	labels[LabelService] = MetricsPortName
+	return labels
+}
+
+// ServiceMonitor asks prometheus-operator to scrape the gateway. It is only
+// rendered when the cluster actually serves the CRD; see
+// controller.PrometheusOperatorInstalled.
+//
+// The scrape interval is left unset on purpose: the scraping Prometheus already
+// has one, and an operator that imposes its own would silently override a
+// cluster-wide decision it knows nothing about.
+func ServiceMonitor(gw *v1alpha1.MailoutGateway) *monitoringv1.ServiceMonitor {
+	return &monitoringv1.ServiceMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      MetricsServiceName(gw.Name),
+			Namespace: gw.Namespace,
+			Labels:    MetricsServiceLabels(gw.Name),
+		},
+		Spec: monitoringv1.ServiceMonitorSpec{
+			Selector: metav1.LabelSelector{MatchLabels: MetricsServiceLabels(gw.Name)},
+			// The Service lives in the gateway's namespace, which is the
+			// operator's; naming it keeps the monitor from matching a Service
+			// of the same shape somewhere else.
+			NamespaceSelector: monitoringv1.NamespaceSelector{MatchNames: []string{gw.Namespace}},
+			Endpoints: []monitoringv1.Endpoint{{
+				Port:   MetricsPortName,
+				Path:   MetricsPath,
+				Scheme: "http",
+			}},
+		},
+	}
+}
+
 // Deployment runs the dataplane. The rendered configuration and every
 // certificate and DKIM key are mounted, and the gateway reloads them from disk
 // on change — so rotating a key or renewing a certificate does not restart a
@@ -215,6 +299,11 @@ func Deployment(gw *v1alpha1.MailoutGateway, cfg *gateway.Config, accounts []Acc
 			Protocol:      corev1.ProtocolTCP,
 		})
 	}
+	ports = append(ports, corev1.ContainerPort{
+		Name:          MetricsPortName,
+		ContainerPort: MetricsPort,
+		Protocol:      corev1.ProtocolTCP,
+	})
 
 	podAnnotations := map[string]string{RestartHashAnnotation: RestartHash(gw, cfg, accounts)}
 	for k, v := range gw.Spec.Deployment.PodAnnotations {
@@ -248,6 +337,7 @@ func Deployment(gw *v1alpha1.MailoutGateway, cfg *gateway.Config, accounts []Acc
 						Args: []string{
 							"gateway",
 							"--config=" + ConfigFilePath(),
+							fmt.Sprintf("--metrics-bind-address=:%d", MetricsPort),
 							"--log-format=json",
 						},
 						Ports:          ports,

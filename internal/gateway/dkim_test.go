@@ -36,7 +36,7 @@ func dkimTestKey(t *testing.T, algorithm, domain, selector string) (DKIMKey, fun
 // is not authority to use it.
 func signedMessage(t *testing.T, keys []DKIMKey, msg *Message, allowedSenders ...string) *Message {
 	t.Helper()
-	signer, err := newDKIMSigner(keys, testLogger())
+	signer, err := newDKIMSigner(keys, testLogger(), nil)
 	if err != nil {
 		t.Fatalf("newDKIMSigner: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestDKIMFallsBackToFromHeader(t *testing.T) {
 func TestDKIMRejectsDuplicateDomain(t *testing.T) {
 	first, _ := dkimTestKey(t, "rsa", "example.test", "a")
 	second, _ := dkimTestKey(t, "rsa", "example.test", "b")
-	if _, err := newDKIMSigner([]DKIMKey{first, second}, testLogger()); err == nil {
+	if _, err := newDKIMSigner([]DKIMKey{first, second}, testLogger(), nil); err == nil {
 		t.Fatal("expected two keys for one domain to be rejected")
 	}
 }

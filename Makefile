@@ -12,12 +12,17 @@ all: generate manifests build test
 
 .PHONY: generate
 generate: ## deepcopy funcs
-	go tool controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/... paths=./internal/certmanager/...
+	go tool controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/... paths=./internal/certmanager/... paths=./internal/monitoring/...
 
+# Only our own packages: internal/certmanager and internal/monitoring declare
+# foreign kinds, and pointing the CRD generator at them would emit a truncated
+# CRD for Certificate and ServiceMonitor — an object that, if it ever reached a
+# cluster, would replace the real one with the three fields we happen to use.
 .PHONY: manifests
 manifests: ## CRDs, RBAC, webhook manifests
 	go tool controller-gen crd rbac:roleName=mailout-operator webhook \
-		paths=./api/... paths=./internal/... output:crd:artifacts:config=config/crd/bases
+		paths=./api/... paths=./internal/controller/... paths=./internal/webhook/... \
+		output:crd:artifacts:config=config/crd/bases
 
 ## --- build -----------------------------------------------------------------
 

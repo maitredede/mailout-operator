@@ -36,6 +36,7 @@ type DKIMKey struct {
 type dkimSigner struct {
 	byDomain map[string]*loadedDKIMKey
 	log      *slog.Logger
+	metrics  *Metrics
 }
 
 type loadedDKIMKey struct {
@@ -45,8 +46,8 @@ type loadedDKIMKey struct {
 	headerKeys []string
 }
 
-func newDKIMSigner(keys []DKIMKey, log *slog.Logger) (*dkimSigner, error) {
-	s := &dkimSigner{byDomain: make(map[string]*loadedDKIMKey, len(keys)), log: log}
+func newDKIMSigner(keys []DKIMKey, log *slog.Logger, metrics *Metrics) (*dkimSigner, error) {
+	s := &dkimSigner{byDomain: make(map[string]*loadedDKIMKey, len(keys)), log: log, metrics: metrics}
 	for i, k := range keys {
 		if k.Domain == "" || k.Selector == "" {
 			return nil, fmt.Errorf("dkim[%d]: domain and selector are required", i)
@@ -90,6 +91,7 @@ func (s *dkimSigner) sign(msg *Message, policy *senderPolicy) error {
 	if !policy.canSign(key.domain) {
 		s.log.Warn("refusing to sign for a domain this account is not allowed to send from",
 			"domain", key.domain, "account", msg.Account, "from", msg.From)
+		s.metrics.dkimResult(key.domain, dkimRefused)
 		return nil
 	}
 	opts := &dkim.SignOptions{
@@ -100,9 +102,11 @@ func (s *dkimSigner) sign(msg *Message, policy *senderPolicy) error {
 	}
 	var signed bytes.Buffer
 	if err := dkim.Sign(&signed, bytes.NewReader(msg.Data), opts); err != nil {
+		s.metrics.dkimResult(key.domain, dkimFailed)
 		return fmt.Errorf("sign for %s: %w", key.domain, err)
 	}
 	msg.Data = signed.Bytes()
+	s.metrics.dkimResult(key.domain, dkimSigned)
 	return nil
 }
 

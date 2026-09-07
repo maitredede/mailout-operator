@@ -73,6 +73,7 @@ type sessionInfo struct {
 type milterChain struct {
 	filters []milterFilter
 	log     *slog.Logger
+	metrics *Metrics
 }
 
 type milterFilter struct {
@@ -80,8 +81,8 @@ type milterFilter struct {
 	client *milter.Client
 }
 
-func newMilterChain(cfg *Config, log *slog.Logger) (*milterChain, error) {
-	chain := &milterChain{log: log}
+func newMilterChain(cfg *Config, log *slog.Logger, metrics *Metrics) (*milterChain, error) {
+	chain := &milterChain{log: log, metrics: metrics}
 	for i, mc := range cfg.Milters {
 		name := mc.Name
 		if name == "" {
@@ -95,6 +96,9 @@ func newMilterChain(cfg *Config, log *slog.Logger) (*milterChain, error) {
 		if timeout == 0 {
 			timeout = defaultMilterTimeout
 		}
+		// Resolve the name once, so logs and metrics label an unnamed filter by
+		// its position rather than by an empty string.
+		mc.Name = name
 		chain.filters = append(chain.filters, milterFilter{
 			cfg: mc,
 			client: milter.NewClient(network, address,
@@ -124,7 +128,7 @@ func (c *milterChain) without(names []string) *milterChain {
 	for _, n := range names {
 		excluded[n] = true
 	}
-	filtered := &milterChain{log: c.log}
+	filtered := &milterChain{log: c.log, metrics: c.metrics}
 	for _, f := range c.filters {
 		if !excluded[f.cfg.Name] {
 			filtered.filters = append(filtered.filters, f)
@@ -141,16 +145,23 @@ func (c *milterChain) run(ctx context.Context, msg *Message, info sessionInfo) e
 	for _, f := range c.filters {
 		err := c.runOne(ctx, f, msg, info)
 		if err == nil {
+			c.metrics.milterDecided(f.cfg.Name, decisionAccept)
 			continue
 		}
 		var smtpErr *smtp.SMTPError
 		if errors.As(err, &smtpErr) {
 			// A verdict, not a malfunction: always honoured.
+			c.metrics.milterDecided(f.cfg.Name, decisionReject)
 			return smtpErr
 		}
 		if errors.Is(err, errDiscard) {
+			c.metrics.milterDecided(f.cfg.Name, decisionDiscard)
 			return err
 		}
+		// Counted the same whether the message then goes through or not: what
+		// this measures is the filter being down, and fail-open is precisely
+		// the case where nothing else would show it.
+		c.metrics.milterDecided(f.cfg.Name, decisionUnavailable)
 		if f.cfg.FailOpen {
 			c.log.Warn("milter unavailable, letting the message through",
 				"milter", f.cfg.Name, "err", err)

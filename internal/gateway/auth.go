@@ -89,6 +89,16 @@ func (s *accountStore) authenticate(username, password string) (*Account, error)
 	return acct, nil
 }
 
+// label returns the username if it names a configured account, and the
+// unknownAccount placeholder otherwise. It exists so that a metric label can
+// never be dictated by whoever is connecting.
+func (s *accountStore) label(username string) string {
+	if _, ok := s.byUsername[username]; ok {
+		return username
+	}
+	return unknownAccount
+}
+
 // loginAuthenticator validates the credentials collected by the LOGIN
 // mechanism.
 type loginAuthenticator func(username, password string) error

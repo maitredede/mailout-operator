@@ -10,6 +10,7 @@ import (
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
 	certmanagerv1 "github.com/maitredede/mailout-operator/internal/certmanager/v1"
 	"github.com/maitredede/mailout-operator/internal/gateway"
+	monitoringv1 "github.com/maitredede/mailout-operator/internal/monitoring/v1"
 	"github.com/maitredede/mailout-operator/internal/render"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -50,6 +51,10 @@ type GatewayReconciler struct {
 	// a gateway asking for an issuer then reports the problem instead of
 	// failing forever.
 	CertManagerAvailable bool
+	// PrometheusOperatorAvailable is false when the cluster has no
+	// ServiceMonitor CRD. The gateway still serves its metrics; only the scrape
+	// declaration is skipped.
+	PrometheusOperatorAvailable bool
 }
 
 // +kubebuilder:rbac:groups=mailout.daly.nc,resources=mailoutgateways,verbs=get;list;watch;update;patch
@@ -57,6 +62,7 @@ type GatewayReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile brings one gateway to its desired state.
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -101,6 +107,9 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 	if err := r.reconcileService(ctx, &gw, cfg); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileMetrics(ctx, &gw); err != nil {
 		return ctrl.Result{}, err
 	}
 	deployment, err := r.reconcileDeployment(ctx, &gw, cfg, accounts)
@@ -270,6 +279,45 @@ func (r *GatewayReconciler) reconcileService(ctx context.Context, gw *v1alpha1.M
 	return nil
 }
 
+// reconcileMetrics keeps the Prometheus Service, and the ServiceMonitor when
+// the cluster can act on one. A cluster without prometheus-operator still gets
+// the Service: it costs nothing, and it is what any other scraper points at.
+func (r *GatewayReconciler) reconcileMetrics(ctx context.Context, gw *v1alpha1.MailoutGateway) error {
+	desired := render.MetricsService(gw)
+	svc := &corev1.Service{}
+	svc.Name = desired.Name
+	svc.Namespace = desired.Namespace
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Labels = desired.Labels
+		clusterIP := svc.Spec.ClusterIP
+		svc.Spec.Selector = desired.Spec.Selector
+		svc.Spec.Type = desired.Spec.Type
+		svc.Spec.Ports = desired.Spec.Ports
+		svc.Spec.ClusterIP = clusterIP
+		return controllerutil.SetControllerReference(gw, svc, r.Scheme)
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile metrics service: %w", err)
+	}
+
+	if !r.PrometheusOperatorAvailable {
+		return nil
+	}
+	desiredMonitor := render.ServiceMonitor(gw)
+	monitor := &monitoringv1.ServiceMonitor{}
+	monitor.Name = desiredMonitor.Name
+	monitor.Namespace = desiredMonitor.Namespace
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, monitor, func() error {
+		monitor.Labels = desiredMonitor.Labels
+		monitor.Spec = desiredMonitor.Spec
+		return controllerutil.SetControllerReference(gw, monitor, r.Scheme)
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile service monitor: %w", err)
+	}
+	return nil
+}
+
 func (r *GatewayReconciler) reconcileDeployment(ctx context.Context, gw *v1alpha1.MailoutGateway,
 	cfg *gateway.Config, accounts []render.Account) (*appsv1.Deployment, error) {
 	desired := render.Deployment(gw, cfg, accounts, r.gatewayImage(gw))
@@ -348,6 +396,9 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("mailoutgateway")
 	if r.CertManagerAvailable {
 		builder = builder.Owns(&certmanagerv1.Certificate{})
+	}
+	if r.PrometheusOperatorAvailable {
+		builder = builder.Owns(&monitoringv1.ServiceMonitor{})
 	}
 	return builder.Complete(r)
 }

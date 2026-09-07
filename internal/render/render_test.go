@@ -3,12 +3,16 @@
 package render
 
 import (
+	"fmt"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
 	"github.com/maitredede/mailout-operator/internal/gateway"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/yaml"
 )
 
@@ -269,7 +273,8 @@ func TestDeploymentMountsConfigCertificatesAndKeys(t *testing.T) {
 			t.Errorf("%s is not mounted; got %v", want, mounted)
 		}
 	}
-	if len(container.Ports) != 2 {
+	// Two listeners plus the metrics port.
+	if len(container.Ports) != 3 {
 		t.Fatalf("ports = %+v", container.Ports)
 	}
 	if got := *container.SecurityContext.ReadOnlyRootFilesystem; !got {
@@ -524,5 +529,82 @@ func TestUpstreamHandlingDKIMDisablesSigning(t *testing.T) {
 		if volume.Secret != nil && volume.Secret.SecretName == "dkim-example" {
 			t.Fatal("the DKIM Secret is still mounted although nothing signs")
 		}
+	}
+}
+
+// The metrics endpoint gets a Service of its own. Folding it into the SMTP one
+// would publish the relay's counters wherever that Service is exposed — and it
+// can be a LoadBalancer.
+func TestMetricsServiceIsSeparateAndAlwaysClusterIP(t *testing.T) {
+	gw := testGateway()
+	gw.Spec.Deployment.ServiceType = corev1.ServiceTypeLoadBalancer
+
+	svc := MetricsService(gw)
+	if svc.Name == gw.Name {
+		t.Fatalf("metrics Service shares the SMTP Service's name %q", svc.Name)
+	}
+	if svc.Spec.Type != corev1.ServiceTypeClusterIP {
+		t.Errorf("metrics Service type = %s, want ClusterIP", svc.Spec.Type)
+	}
+	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Name != MetricsPortName {
+		t.Fatalf("ports = %+v", svc.Spec.Ports)
+	}
+
+	// The ServiceMonitor must select the metrics Service and nothing else: the
+	// SMTP Service carries the shared labels too, and scraping port 587 as if
+	// it spoke HTTP would produce a permanently failing target.
+	monitor := ServiceMonitor(gw)
+	selector := labels.SelectorFromSet(monitor.Spec.Selector.MatchLabels)
+	if !selector.Matches(labels.Set(svc.Labels)) {
+		t.Errorf("the monitor does not select the metrics Service: %v vs %v",
+			monitor.Spec.Selector.MatchLabels, svc.Labels)
+	}
+	cfg, err := GatewayConfig(Input{Gateway: gw})
+	if err != nil {
+		t.Fatalf("GatewayConfig: %v", err)
+	}
+	if smtp := Service(gw, cfg); selector.Matches(labels.Set(smtp.Labels)) {
+		t.Errorf("the monitor also selects the SMTP Service: %v", smtp.Labels)
+	}
+	if got := monitor.Spec.NamespaceSelector.MatchNames; len(got) != 1 || got[0] != gw.Namespace {
+		t.Errorf("namespaceSelector = %v, want [%s]", got, gw.Namespace)
+	}
+	if len(monitor.Spec.Endpoints) != 1 || monitor.Spec.Endpoints[0].Port != MetricsPortName {
+		t.Fatalf("endpoints = %+v", monitor.Spec.Endpoints)
+	}
+}
+
+// The scrape target is a named port: prometheus-operator resolves the endpoint
+// against the Service's port names, so the container port, the Service port and
+// the monitor must agree on one string.
+func TestMetricsPortIsNamedConsistently(t *testing.T) {
+	gw := testGateway()
+	cfg, err := GatewayConfig(Input{Gateway: gw})
+	if err != nil {
+		t.Fatalf("GatewayConfig: %v", err)
+	}
+	container := Deployment(gw, cfg, nil, "img").Spec.Template.Spec.Containers[0]
+
+	var found bool
+	for _, p := range container.Ports {
+		if p.Name == MetricsPortName {
+			found = true
+			if p.ContainerPort != MetricsPort {
+				t.Errorf("container metrics port = %d, want %d", p.ContainerPort, MetricsPort)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no %s container port: %+v", MetricsPortName, container.Ports)
+	}
+
+	wantArg := fmt.Sprintf("--metrics-bind-address=:%d", MetricsPort)
+	if !slices.Contains(container.Args, wantArg) {
+		t.Errorf("args = %v, want it to contain %s", container.Args, wantArg)
+	}
+
+	target := MetricsService(gw).Spec.Ports[0].TargetPort
+	if target.StrVal != MetricsPortName {
+		t.Errorf("Service targetPort = %v, want the named port %s", target, MetricsPortName)
 	}
 }

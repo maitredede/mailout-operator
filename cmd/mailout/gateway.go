@@ -13,13 +13,15 @@ import (
 	"github.com/maitredede/mailout-operator/internal/gateway"
 	"github.com/maitredede/mailout-operator/internal/source"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
 func newGatewayCommand() *cobra.Command {
 	var (
-		configPath string
-		logLevel   string
-		logFormat  string
+		configPath  string
+		metricsAddr string
+		logLevel    string
+		logFormat   string
 	)
 	cmd := &cobra.Command{
 		Use:   "gateway",
@@ -32,16 +34,18 @@ func newGatewayCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runGateway(cmd.Context(), configPath, log)
+			return runGateway(cmd.Context(), configPath, metricsAddr, log)
 		},
 	}
 	cmd.Flags().StringVarP(&configPath, "config", "c", "/etc/mailout/gateway.yaml", "path to the gateway configuration")
+	cmd.Flags().StringVar(&metricsAddr, "metrics-bind-address", ":9090",
+		"address the Prometheus endpoint listens on, empty to disable it")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "debug, info, warn or error")
 	cmd.Flags().StringVar(&logFormat, "log-format", "text", "text or json")
 	return cmd
 }
 
-func runGateway(ctx context.Context, configPath string, log *slog.Logger) error {
+func runGateway(ctx context.Context, configPath, metricsAddr string, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -50,10 +54,17 @@ func runGateway(ctx context.Context, configPath string, log *slog.Logger) error 
 	if err != nil {
 		return err
 	}
-	srv, err := gateway.NewServer(cfg, log)
+	metrics := gateway.NewMetrics()
+	srv, err := gateway.NewServer(cfg, log, gateway.WithMetrics(metrics))
 	if err != nil {
 		return err
 	}
+
+	// The two share a context: a metrics endpoint that cannot bind is a
+	// configuration error, and starting the relay half-instrumented would hide
+	// it until someone went looking for a dashboard.
+	group, ctx := errgroup.WithContext(ctx)
+	group.Go(func() error { return gateway.ServeMetrics(ctx, metricsAddr, metrics, log) })
 
 	go func() {
 		// A rejected reload leaves the running configuration in place: a bad
@@ -67,7 +78,8 @@ func runGateway(ctx context.Context, configPath string, log *slog.Logger) error 
 		}
 	}()
 
-	return srv.Run(ctx)
+	group.Go(func() error { return srv.Run(ctx) })
+	return group.Wait()
 }
 
 func newLogger(level, format string) (*slog.Logger, error) {

@@ -127,7 +127,7 @@ func testLogger() *slog.Logger {
 
 func newTestChain(t *testing.T, filters ...Milter) *milterChain {
 	t.Helper()
-	chain, err := newMilterChain(&Config{Milters: filters}, testLogger())
+	chain, err := newMilterChain(&Config{Milters: filters}, testLogger(), nil)
 	if err != nil {
 		t.Fatalf("newMilterChain: %v", err)
 	}

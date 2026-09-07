@@ -57,6 +57,7 @@ const k3sImage = "rancher/k3s:v1.34.9-k3s1"
 const (
 	gatewayNodePort = 31587
 	mailpitNodePort = 31825
+	metricsNodePort = 31909
 )
 
 const (
@@ -87,9 +88,11 @@ type cluster struct {
 	// Clientset reads pod logs, which the typed client cannot do and which is
 	// the only way to see why a gateway pod refuses to start.
 	Clientset *kubernetes.Clientset
-	// GatewaySMTPAddr and MailpitAPIURL are reachable from the test process.
+	// GatewaySMTPAddr, MailpitAPIURL and MetricsURL are reachable from the test
+	// process.
 	GatewaySMTPAddr string
 	MailpitAPIURL   string
+	MetricsURL      string
 
 	restConfig *rest.Config
 	scheme     *runtime.Scheme
@@ -168,6 +171,7 @@ func startBareCluster(t *testing.T, installCRDs bool) *cluster {
 		testcontainers.WithExposedPorts(
 			fmt.Sprintf("%d/tcp", gatewayNodePort),
 			fmt.Sprintf("%d/tcp", mailpitNodePort),
+			fmt.Sprintf("%d/tcp", metricsNodePort),
 		),
 	}
 	options = append(options, startupManifests...)
@@ -204,6 +208,10 @@ func startBareCluster(t *testing.T, installCRDs bool) *cluster {
 	if err != nil {
 		t.Fatalf("mailpit port: %v", err)
 	}
+	metricsPort, err := container.MappedPort(ctx, fmt.Sprintf("%d/tcp", metricsNodePort))
+	if err != nil {
+		t.Fatalf("metrics port: %v", err)
+	}
 
 	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
@@ -215,6 +223,7 @@ func startBareCluster(t *testing.T, installCRDs bool) *cluster {
 		Clientset:       clientset,
 		GatewaySMTPAddr: fmt.Sprintf("%s:%s", host, smtpPort.Port()),
 		MailpitAPIURL:   fmt.Sprintf("http://%s:%s", host, apiPort.Port()),
+		MetricsURL:      fmt.Sprintf("http://%s:%s%s", host, metricsPort.Port(), render.MetricsPath),
 		restConfig:      restConfig,
 		scheme:          scheme,
 		container:       container,
@@ -529,6 +538,41 @@ func waitForMailpitMessage(t *testing.T, apiURL, subject string, timeout time.Du
 	return ""
 }
 
+// scrapeMetrics fetches the dataplane's Prometheus endpoint, retrying while
+// kube-proxy programs the node port for the newly ready pod.
+func scrapeMetrics(t *testing.T, url string, timeout time.Duration) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
+	defer cancel()
+
+	var lastErr error
+	for ctx.Err() == nil {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Second)
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read metrics: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("status %s", resp.Status)
+			time.Sleep(time.Second)
+			continue
+		}
+		return string(body)
+	}
+	t.Fatalf("the metrics endpoint at %s never answered within %s: %v", url, timeout, lastErr)
+	return ""
+}
+
 // nodePortService exposes the gateway's pods on a fixed node port. The operator
 // deliberately does not manage node ports, so the test owns this Service.
 func nodePortService(gatewayName string) *corev1.Service {
@@ -545,6 +589,14 @@ func nodePortService(gatewayName string) *corev1.Service {
 				Port:       587,
 				TargetPort: intstr.FromInt32(587),
 				NodePort:   gatewayNodePort,
+			}, {
+				// Published only so the test can scrape the pod from outside
+				// the cluster. In a real deployment the metrics live on their
+				// own ClusterIP Service, never on the SMTP one.
+				Name:       render.MetricsPortName,
+				Port:       render.MetricsPort,
+				TargetPort: intstr.FromString(render.MetricsPortName),
+				NodePort:   metricsNodePort,
 			}},
 		},
 	}

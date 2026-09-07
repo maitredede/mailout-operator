@@ -47,7 +47,7 @@ type accountPolicy struct {
 	skipHeaderFromCheck bool
 }
 
-func newSnapshot(cfg *Config, log *slog.Logger) (*snapshot, error) {
+func newSnapshot(cfg *Config, log *slog.Logger, metrics *Metrics) (*snapshot, error) {
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -60,11 +60,11 @@ func newSnapshot(cfg *Config, log *slog.Logger) (*snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	milters, err := newMilterChain(cfg, log)
+	milters, err := newMilterChain(cfg, log, metrics)
 	if err != nil {
 		return nil, err
 	}
-	signer, err := newDKIMSigner(cfg.DKIM, log)
+	signer, err := newDKIMSigner(cfg.DKIM, log, metrics)
 	if err != nil {
 		return nil, err
 	}
@@ -113,6 +113,7 @@ func (s *snapshot) policyFor(username string) accountPolicy {
 // the process (changing them is a Deployment change, which restarts the pod).
 type Server struct {
 	log     *slog.Logger
+	metrics *Metrics
 	current atomic.Pointer[snapshot]
 
 	mu      sync.Mutex
@@ -132,12 +133,24 @@ func (s *Server) SetOnListen(fn func(l Listener, addr string)) {
 	s.onListen = fn
 }
 
+// ServerOption tunes a Server at construction.
+type ServerOption func(*Server)
+
+// WithMetrics instruments the dataplane. Without it the server counts nothing,
+// which is what the tests that do not care about metrics get.
+func WithMetrics(m *Metrics) ServerOption {
+	return func(s *Server) { s.metrics = m }
+}
+
 // NewServer builds a dataplane serving cfg.
-func NewServer(cfg *Config, log *slog.Logger) (*Server, error) {
+func NewServer(cfg *Config, log *slog.Logger, opts ...ServerOption) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
 	s := &Server{log: log}
+	for _, opt := range opts {
+		opt(s)
+	}
 	if err := s.Reload(cfg); err != nil {
 		return nil, err
 	}
@@ -148,11 +161,15 @@ func NewServer(cfg *Config, log *slog.Logger) (*Server, error) {
 // the previous one stays in service: a bad update must never take the relay
 // down.
 func (s *Server) Reload(cfg *Config) error {
-	snap, err := newSnapshot(cfg, s.log)
+	snap, err := newSnapshot(cfg, s.log, s.metrics)
 	if err != nil {
+		s.metrics.configReloaded("failure", 0, 0)
 		return err
 	}
 	s.current.Store(snap)
+	// After the swap, so the gauges never describe a configuration that is not
+	// the one being served.
+	s.metrics.configReloaded("success", len(snap.accounts.byUsername), len(snap.rejected))
 	s.log.Info("configuration loaded",
 		"accounts", len(snap.accounts.byUsername),
 		"accountsRejected", len(snap.rejected),
@@ -310,6 +327,10 @@ func (s *session) authenticate(username, password string) error {
 	if err != nil {
 		s.server.log.Warn("authentication refused",
 			"username", username, "remote", s.remoteAddr(), "reason", err)
+		// Only a username the gateway actually serves becomes a label: the one
+		// on the wire is chosen by the caller, and would let anyone mint time
+		// series by guessing names.
+		s.server.metrics.authFailed(s.snap.accounts.label(username))
 		return smtp.ErrAuthFailed
 	}
 	s.account = acct
@@ -325,6 +346,7 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 	if !policy.senders.allows(from) {
 		s.server.log.Warn("envelope sender refused",
 			"account", s.account.Username, "from", from, "remote", s.remoteAddr())
+		s.server.metrics.messageHandled(s.account.Username, ResultRejected)
 		return errSenderNotAllowed(from)
 	}
 	s.from = from
@@ -382,6 +404,7 @@ func (s *session) Data(r io.Reader) error {
 		if err := checkHeaderFrom(msg.Data, policy.senders); err != nil {
 			s.server.log.Warn("From header refused",
 				"account", s.account.Username, "envelope", msg.From, "remote", s.remoteAddr())
+			s.server.metrics.messageHandled(msg.Account, ResultRejected)
 			return err
 		}
 	}
@@ -393,10 +416,12 @@ func (s *session) Data(r io.Reader) error {
 			if errors.Is(err, errDiscard) {
 				s.server.log.Info("message discarded by a filter",
 					"account", msg.Account, "from", msg.From)
+				s.server.metrics.messageHandled(msg.Account, ResultDiscarded)
 				return nil
 			}
 			s.server.log.Info("message rejected by a filter",
 				"account", msg.Account, "from", msg.From, "err", err)
+			s.server.metrics.messageHandled(msg.Account, filterResult(err))
 			return err
 		}
 	}
@@ -405,6 +430,7 @@ func (s *session) Data(r io.Reader) error {
 	if !s.snap.dkim.empty() {
 		if err := s.snap.dkim.sign(msg, policy.senders); err != nil {
 			s.server.log.Error("DKIM signing failed", "account", msg.Account, "err", err)
+			s.server.metrics.messageHandled(msg.Account, ResultDeferred)
 			return &smtp.SMTPError{
 				Code:         451,
 				EnhancedCode: smtp.EnhancedCode{4, 3, 0},
@@ -417,15 +443,38 @@ func (s *session) Data(r io.Reader) error {
 	// should finish rather than be cancelled by a shutdown. The relayer applies
 	// its own timeout, which is what bounds this call.
 	start := time.Now()
-	if err := s.snap.relay.send(context.Background(), msg); err != nil {
+	err = s.snap.relay.send(context.Background(), msg)
+	s.server.metrics.upstreamDelivered(time.Since(start))
+	if err != nil {
 		s.server.log.Warn("relay failed",
 			"account", msg.Account, "from", msg.From, "rcpt", len(msg.To), "err", err)
+		s.server.metrics.messageHandled(msg.Account, relayResult(err))
 		return err
 	}
 	s.server.log.Info("relayed",
 		"account", msg.Account, "from", msg.From, "rcpt", len(msg.To),
 		"bytes", len(msg.Data), "took", time.Since(start))
+	s.server.metrics.messageRelayed(msg.Account, len(msg.Data))
 	return nil
+}
+
+// filterResult and relayResult classify a refusal by what the client should do
+// about it, which is what the SMTP code already says: 4xx means try again, 5xx
+// means never. Counting them apart is what separates "the upstream is down"
+// from "this tenant is sending mail it is not allowed to send".
+func filterResult(err error) string { return resultFor(err, ResultRejected) }
+
+func relayResult(err error) string { return resultFor(err, ResultDeferred) }
+
+func resultFor(err error, fallback string) string {
+	var smtpErr *smtp.SMTPError
+	if errors.As(err, &smtpErr) {
+		if smtpErr.Code >= 500 {
+			return ResultRejected
+		}
+		return ResultDeferred
+	}
+	return fallback
 }
 
 // checkHeaderFrom applies the sender policy to the message's From header. A

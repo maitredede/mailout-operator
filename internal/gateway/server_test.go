@@ -108,6 +108,7 @@ type testGateway struct {
 	smtpsAddr      string
 	upstream       *fakeUpstream
 	caPool         *x509.CertPool
+	metrics        *Metrics
 }
 
 const (
@@ -151,7 +152,8 @@ func newTestGateway(t *testing.T, opts ...func(*Config)) *testGateway {
 		opt(cfg)
 	}
 
-	srv, err := NewServer(cfg, testLogger())
+	metrics := NewMetrics()
+	srv, err := NewServer(cfg, testLogger(), WithMetrics(metrics))
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -172,7 +174,7 @@ func newTestGateway(t *testing.T, opts ...func(*Config)) *testGateway {
 		}
 	})
 
-	gw := &testGateway{upstream: upstream, caPool: pool}
+	gw := &testGateway{upstream: upstream, caPool: pool, metrics: metrics}
 	for range 2 {
 		select {
 		case addr := <-addrs:

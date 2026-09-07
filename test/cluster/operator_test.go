@@ -160,6 +160,19 @@ func TestOperatorDeploysAWorkingRelay(t *testing.T) {
 		t.Fatalf("the relayed message is not properly signed: %v %+v\n%s", err, verifications, raw)
 	}
 
+	// The endpoint the ServiceMonitor would point at must actually serve, in a
+	// real pod, with the flag the operator rendered. And it must have counted
+	// the message that just went through: a metrics port that is open but wired
+	// to nothing looks identical from the outside.
+	metrics := scrapeMetrics(t, cl.MetricsURL, time.Minute)
+	wantSeries := fmt.Sprintf("mailout_messages_total{account=%q,result=%q} 1", username, gateway.ResultRelayed)
+	if !strings.Contains(metrics, wantSeries) {
+		t.Errorf("the relayed message was not counted; wanted %s in:\n%s", wantSeries, metrics)
+	}
+	if !strings.Contains(metrics, "mailout_accounts 1") {
+		t.Errorf("the served-account gauge is missing:\n%s", metrics)
+	}
+
 	// And the status must reflect what happened.
 	var fresh v1alpha1.MailoutGateway
 	if err := c.Get(t.Context(), client.ObjectKeyFromObject(gw), &fresh); err != nil {
