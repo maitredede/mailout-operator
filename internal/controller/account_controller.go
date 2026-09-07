@@ -122,7 +122,7 @@ func (r *AccountReconciler) reconcileSecret(ctx context.Context, account *v1alph
 			log.Info("password generated", "account", account.Name, "rotation", account.Spec.Rotation)
 		}
 
-		desired := render.AccountSecret(account, username, password, hash, endpoint)
+		desired := render.AccountSecret(account, username, password, hash, endpoint, gw.Namespace)
 		secret.Labels = desired.Labels
 		secret.Type = desired.Type
 		secret.Data = desired.Data

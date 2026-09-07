@@ -339,11 +339,31 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Watches(&v1alpha1.MailoutAccount{},
 			handler.EnqueueRequestsFromMapFunc(r.gatewayForAccount)).
+		// An account's Secret belongs to the account, not to the gateway, so
+		// rewriting it produces no ownership event here. Without this watch a
+		// rotated password would only reach the dataplane at the next resync.
+		Watches(&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.gatewayForAccountSecret)).
 		Named("mailoutgateway")
 	if r.CertManagerAvailable {
 		builder = builder.Owns(&certmanagerv1.Certificate{})
 	}
 	return builder.Complete(r)
+}
+
+// gatewayForAccountSecret maps an account's credentials Secret back to the
+// gateway whose configuration embeds its hash.
+func (r *GatewayReconciler) gatewayForAccountSecret(_ context.Context, obj client.Object) []reconcile.Request {
+	labels := obj.GetLabels()
+	name := labels[render.LabelGatewayName]
+	if name == "" {
+		return nil
+	}
+	namespace := labels[render.LabelGatewayNamespace]
+	if namespace == "" {
+		namespace = r.OperatorNamespace
+	}
+	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: namespace, Name: name}}}
 }
 
 // gatewayForAccount maps an account to the gateway that must be re-rendered.

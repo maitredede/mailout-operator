@@ -164,10 +164,13 @@ make lint build
 dependencies, so there is nothing to install: `make generate manifests` works
 from a bare checkout.
 
-`make test-cluster` is the one that catches what the others cannot: it starts a
-real k3s in a container, deploys the operator's own output into it, and sends a
-message through the pod that comes out. A rendered manifest can be perfectly
-valid and still produce a container that will not start.
+`make test-cluster` is the one that catches what the others cannot. It starts a
+real k3s in a container and runs two scenarios: the operator reconciling
+in-process, to check that the pods it deploys actually relay mail; and the
+operator deployed from `config/default` with cert-manager, to check that the
+manifests in this repository work — the webhook's CA injection and the
+gateway's issued listener certificate included. A rendered manifest can be
+perfectly valid and still produce a container that will not start.
 
 ## Not there yet
 

@@ -351,7 +351,8 @@ func TestAccountSecretShape(t *testing.T) {
 			SecretRef: v1alpha1.LocalObjectReference{Name: "invoicing-smtp"},
 		},
 	}
-	secret := AccountSecret(account, "billing.invoicing", "s3cret", "$2a$12$hash", GatewayEndpoint(gw, cfg))
+	secret := AccountSecret(account, "billing.invoicing", "s3cret", "$2a$12$hash",
+		GatewayEndpoint(gw, cfg), gw.Namespace)
 
 	if secret.Type != "kubernetes.io/basic-auth" {
 		t.Fatalf("type = %q", secret.Type)
@@ -455,5 +456,38 @@ func TestMountedSecretsAreReadableByTheDataplaneUser(t *testing.T) {
 			t.Errorf("volume %s is mounted %#o, which the dataplane user cannot read",
 				volume.Name, mode)
 		}
+	}
+}
+
+// The account Secret must say which gateway it feeds. It belongs to the
+// account, so the gateway controller gets no ownership event when it is
+// rewritten — these labels are what lets a rotation reach the dataplane without
+// waiting for the periodic resync.
+func TestAccountSecretIsLabelledWithItsGateway(t *testing.T) {
+	gw := testGateway()
+	cfg, err := GatewayConfig(Input{Gateway: gw})
+	if err != nil {
+		t.Fatalf("GatewayConfig: %v", err)
+	}
+	account := &v1alpha1.MailoutAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "invoicing", Namespace: "billing"},
+		Spec: v1alpha1.MailoutAccountSpec{
+			GatewayRef: v1alpha1.GatewayReference{Name: "default"},
+			SecretRef:  v1alpha1.LocalObjectReference{Name: "invoicing-smtp"},
+		},
+	}
+	secret := AccountSecret(account, "billing.invoicing", "p", "h",
+		GatewayEndpoint(gw, cfg), gw.Namespace)
+
+	if got := secret.Labels[LabelGatewayName]; got != "default" {
+		t.Errorf("%s = %q, want default", LabelGatewayName, got)
+	}
+	if got := secret.Labels[LabelGatewayNamespace]; got != "mailout-system" {
+		t.Errorf("%s = %q, want mailout-system", LabelGatewayNamespace, got)
+	}
+	// The cache only holds Secrets carrying this label, so losing it would make
+	// the watch silently blind.
+	if got := secret.Labels["app.kubernetes.io/managed-by"]; got != "mailout-operator" {
+		t.Errorf("managed-by = %q", got)
 	}
 }

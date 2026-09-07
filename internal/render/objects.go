@@ -24,6 +24,11 @@ const (
 	// the rendered configuration. It is a Secret, not a ConfigMap: it carries
 	// the account hashes and the upstream password.
 	ConfigSecretSuffix = "-config"
+	// LabelGatewayName and LabelGatewayNamespace mark which gateway an object
+	// belongs to, for objects the gateway controller does not own.
+	LabelGatewayName      = "mailout.daly.nc/gateway"
+	LabelGatewayNamespace = "mailout.daly.nc/gateway-namespace"
+
 	// RestartHashAnnotation carries a digest of the parts of the configuration
 	// a running gateway cannot pick up by itself. The rest — accounts, keys,
 	// filters — is reloaded from disk without a restart.
@@ -305,12 +310,13 @@ const PasswordHashKey = "passwordHash"
 
 // AccountSecret is what an application consumes: a basic-auth Secret carrying
 // the credentials and where to send. It is written entirely by the operator.
-func AccountSecret(account *v1alpha1.MailoutAccount, username, password, passwordHash string, endpoint Endpoint) *corev1.Secret {
+func AccountSecret(account *v1alpha1.MailoutAccount, username, password, passwordHash string,
+	endpoint Endpoint, gatewayNamespace string) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      account.Spec.SecretRef.Name,
 			Namespace: account.Namespace,
-			Labels:    accountSecretLabels(account),
+			Labels:    accountSecretLabels(account, gatewayNamespace),
 		},
 		Type: corev1.SecretTypeBasicAuth,
 		Data: map[string][]byte{
@@ -347,11 +353,17 @@ func GatewayEndpoint(gw *v1alpha1.MailoutGateway, cfg *gateway.Config) Endpoint 
 	return endpoint
 }
 
-func accountSecretLabels(account *v1alpha1.MailoutAccount) map[string]string {
+func accountSecretLabels(account *v1alpha1.MailoutAccount, gatewayNamespace string) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "mailout",
 		"app.kubernetes.io/component":  "account",
 		"app.kubernetes.io/managed-by": "mailout-operator",
 		"mailout.daly.nc/account":      account.Name,
+		// The gateway this account feeds. The Secret belongs to the account, so
+		// the gateway controller gets no ownership event when it is rewritten;
+		// these labels are how a rotation reaches the gateway without waiting
+		// for the periodic resync.
+		LabelGatewayName:      account.Spec.GatewayRef.Name,
+		LabelGatewayNamespace: gatewayNamespace,
 	}
 }

@@ -189,11 +189,18 @@ func TestOperatorDeploysAWorkingRelay(t *testing.T) {
 	}
 
 	rotated := waitForNewPassword(t, c, tenantNamespace, "invoicing-smtp", password, time.Minute)
-	// A mounted Secret takes up to a kubelet sync period to change on disk, and
-	// the gateway then reloads it; two minutes covers both.
+
+	// The published configuration must pick up the new hash promptly: the
+	// account's Secret belongs to the account, so this only happens because the
+	// gateway controller watches it by label rather than waiting for its resync.
+	cl.waitForPublishedHash(t, "relay", tenantNamespace, "invoicing-smtp", time.Minute)
+
+	// From there it is Kubernetes' own latency: a mounted Secret changes on disk
+	// after the kubelet's sync period plus its cache TTL, and the gateway then
+	// reloads it. Four minutes covers the documented worst case.
 	const rotatedSubject = "cluster relay after rotation"
 	if err := waitForSuccessfulSubmission(t, cl.GatewaySMTPAddr, caPool, username, rotated,
-		rotatedSubject, 2*time.Minute); err != nil {
+		rotatedSubject, 4*time.Minute); err != nil {
 		cl.describeGatewayPods(t)
 		t.Fatalf("the rotated password never became usable: %v", err)
 	}

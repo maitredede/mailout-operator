@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,6 +85,18 @@ type cluster struct {
 	// GatewaySMTPAddr and MailpitAPIURL are reachable from the test process.
 	GatewaySMTPAddr string
 	MailpitAPIURL   string
+
+	restConfig *rest.Config
+	scheme     *runtime.Scheme
+	container  *k3s.K3sContainer
+}
+
+// loadTestImage makes the locally built image available to the cluster's
+// container runtime; nothing pulls it from a registry.
+func (cl *cluster) loadTestImage(t *testing.T) error {
+	t.Helper()
+	// The load outlives t.Context() in the same way the container does.
+	return cl.container.LoadImages(context.Background(), testImage())
 }
 
 // scheme knows every type the test manipulates.
@@ -97,8 +110,26 @@ func newScheme(t *testing.T) *runtime.Scheme {
 }
 
 // startCluster brings up k3s with the CRDs and a Mailpit standing in for the
-// upstream server, then starts the reconcilers.
+// upstream server, then runs the reconcilers in-process.
+//
+// Use it to test behaviour. To test the deployment itself — the operator running
+// as a pod, its webhook, cert-manager — use startBareCluster instead: two
+// operators reconciling one cluster would fight.
 func startCluster(t *testing.T) *cluster {
+	t.Helper()
+	cl := startBareCluster(t, true)
+	if err := cl.loadTestImage(t); err != nil {
+		t.Fatalf("load image %s into the cluster: %v\n"+
+			"Build it first: make docker-build IMG=%s", testImage(), err, testImage())
+	}
+	waitForCRDs(t, cl.Client)
+	startReconcilers(t, cl.restConfig, cl.scheme)
+	return cl
+}
+
+// startBareCluster brings up k3s and Mailpit, with the CRDs installed only if
+// asked. Nothing reconciles: the caller decides what runs.
+func startBareCluster(t *testing.T, installCRDs bool) *cluster {
 	t.Helper()
 	// Containers are torn down from Cleanup, which runs after t.Context() has
 	// already been cancelled.
@@ -109,16 +140,18 @@ func startCluster(t *testing.T) *cluster {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true), zap.WriteTo(io.Discard)))
 
 	manifests := t.TempDir()
-	crdPath := filepath.Join(manifests, "mailout-crds.yaml")
-	writeCRDs(t, crdPath)
 	supportPath := filepath.Join(manifests, "mailout-support.yaml")
 	if err := os.WriteFile(supportPath, []byte(supportManifest), 0o644); err != nil {
 		t.Fatalf("write support manifest: %v", err)
 	}
+	startupManifests := []testcontainers.ContainerCustomizer{k3s.WithManifest(supportPath)}
+	if installCRDs {
+		crdPath := filepath.Join(manifests, "mailout-crds.yaml")
+		writeCRDs(t, crdPath)
+		startupManifests = append(startupManifests, k3s.WithManifest(crdPath))
+	}
 
-	container, err := k3s.Run(ctx, k3sImage,
-		k3s.WithManifest(crdPath),
-		k3s.WithManifest(supportPath),
+	options := []testcontainers.ContainerCustomizer{
 		// The kubelet sees the host's filesystem, so a developer machine with a
 		// nearly-full disk trips the default DiskPressure threshold and the node
 		// taints itself NoSchedule. This cluster lives for one test, so the
@@ -131,17 +164,14 @@ func startCluster(t *testing.T) *cluster {
 			fmt.Sprintf("%d/tcp", gatewayNodePort),
 			fmt.Sprintf("%d/tcp", mailpitNodePort),
 		),
-	)
+	}
+	options = append(options, startupManifests...)
+
+	container, err := k3s.Run(ctx, k3sImage, options...)
 	if err != nil {
 		t.Fatalf("start k3s: %v", err)
 	}
 	t.Cleanup(func() { _ = container.Terminate(ctx) })
-
-	// The gateway pods run the image under test, which only exists locally.
-	if err := container.LoadImages(ctx, testImage()); err != nil {
-		t.Fatalf("load image %s into the cluster: %v\n"+
-			"Build it first: make docker-build IMG=%s", testImage(), err, testImage())
-	}
 
 	kubeconfig, err := container.GetKubeConfig(ctx)
 	if err != nil {
@@ -175,16 +205,15 @@ func startCluster(t *testing.T) *cluster {
 		t.Fatalf("create clientset: %v", err)
 	}
 
-	cl := &cluster{
+	return &cluster{
 		Client:          c,
 		Clientset:       clientset,
 		GatewaySMTPAddr: fmt.Sprintf("%s:%s", host, smtpPort.Port()),
 		MailpitAPIURL:   fmt.Sprintf("http://%s:%s", host, apiPort.Port()),
+		restConfig:      restConfig,
+		scheme:          scheme,
+		container:       container,
 	}
-
-	waitForCRDs(t, c)
-	startReconcilers(t, restConfig, scheme)
-	return cl
 }
 
 // writeCRDs renders the CRDs k3s applies at startup.
@@ -383,6 +412,40 @@ func (cl *cluster) podLogs(t *testing.T, podName string, previous bool) string {
 		return fmt.Sprintf("(could not read logs: %v)", err)
 	}
 	return string(body)
+}
+
+// waitForPublishedHash blocks until the gateway's rendered configuration
+// carries the hash currently in the account's Secret. It separates "the
+// operator has not republished" from "the pod has not reloaded yet", which look
+// identical from the client side.
+func (cl *cluster) waitForPublishedHash(t *testing.T, gatewayName, accountNamespace, accountSecret string,
+	timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var wanted, published string
+	for time.Now().Before(deadline) {
+		var secret corev1.Secret
+		if err := cl.Client.Get(t.Context(), client.ObjectKey{
+			Namespace: accountNamespace, Name: accountSecret,
+		}, &secret); err != nil {
+			time.Sleep(time.Second)
+			continue
+		}
+		wanted = string(secret.Data[render.PasswordHashKey])
+
+		var config corev1.Secret
+		if err := cl.Client.Get(t.Context(), client.ObjectKey{
+			Namespace: operatorNamespace, Name: render.ConfigSecretName(gatewayName),
+		}, &config); err == nil {
+			published = string(config.Data[render.ConfigFileName])
+			if wanted != "" && strings.Contains(published, wanted) {
+				return
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("the operator never published the account's current hash within %s\n"+
+		"wanted hash: %s\npublished configuration:\n%s", timeout, wanted, published)
 }
 
 // nodePortService exposes the gateway's pods on a fixed node port. The operator

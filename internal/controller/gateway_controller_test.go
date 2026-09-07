@@ -337,3 +337,63 @@ func TestGatewayDoesNotRestartPodsWhenAccountsChange(t *testing.T) {
 		t.Fatalf("the new account was not published: %+v", cfg.Accounts)
 	}
 }
+
+// A rotated password must reach the gateway's configuration as soon as the
+// account's Secret is rewritten. The Secret belongs to the account, so this only
+// works if the gateway controller watches it by label.
+func TestGatewayIsWokenByAnAccountSecretChange(t *testing.T) {
+	c := newTestClient(t)
+	ensureOperatorNamespace(t, c)
+	gw := newGateway(t, c, "wakeup")
+	ns := newNamespace(t, c, "tenant")
+	account := newAccount(t, c, ns, "rotating", gw.Name, func(a *v1alpha1.MailoutAccount) {
+		a.Spec.Rotation = "first"
+	})
+
+	accountReconciler := newAccountReconciler(c)
+	gatewayReconciler := newGatewayReconciler(c)
+	reconcileAccount(t, accountReconciler, account)
+	reconcileGateway(t, gatewayReconciler, gw)
+
+	before := renderedConfig(t, c, "wakeup")
+	if len(before.Accounts) != 1 {
+		t.Fatalf("accounts = %+v", before.Accounts)
+	}
+
+	// The Secret must point back at its gateway, which is what the watch reads.
+	secret := getSecret(t, c, ns, "rotating-smtp")
+	requests := gatewayReconciler.gatewayForAccountSecret(t.Context(), secret)
+	if len(requests) != 1 {
+		t.Fatalf("the Secret maps to %d gateways, want 1: labels=%v", len(requests), secret.Labels)
+	}
+	if requests[0].Name != "wakeup" || requests[0].Namespace != operatorNamespace {
+		t.Fatalf("the Secret maps to %s", requests[0].NamespacedName)
+	}
+
+	// And a rotation must actually change what gets published.
+	account = refreshAccount(t, c, account)
+	account.Spec.Rotation = "second"
+	if err := c.Update(t.Context(), account); err != nil {
+		t.Fatalf("update rotation: %v", err)
+	}
+	reconcileAccount(t, accountReconciler, account)
+	reconcileGateway(t, gatewayReconciler, refreshGateway(t, c, gw))
+
+	after := renderedConfig(t, c, "wakeup")
+	if after.Accounts[0].PasswordHash == before.Accounts[0].PasswordHash {
+		t.Fatal("the published hash did not change after a rotation")
+	}
+	if got := string(getSecret(t, c, ns, "rotating-smtp").Data[render.PasswordHashKey]); got != after.Accounts[0].PasswordHash {
+		t.Fatal("the published hash is not the one in the account's Secret")
+	}
+}
+
+// A Secret that is none of ours must not enqueue anything.
+func TestUnrelatedSecretMapsToNoGateway(t *testing.T) {
+	c := newTestClient(t)
+	r := newGatewayReconciler(c)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "random", Namespace: "elsewhere"}}
+	if requests := r.gatewayForAccountSecret(t.Context(), secret); len(requests) != 0 {
+		t.Fatalf("an unrelated Secret enqueued %+v", requests)
+	}
+}
