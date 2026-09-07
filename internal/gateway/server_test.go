@@ -414,31 +414,188 @@ func TestAccountCanDisableAFilter(t *testing.T) {
 	}
 }
 
-// An account's own DKIM key overrides the gateway's.
-func TestAccountDKIMOverridesTheGatewayKey(t *testing.T) {
-	gatewayKey, _ := dkimTestKey(t, "rsa", "example.test", "gw")
-	accountKey, accountLookup := dkimTestKey(t, "rsa", "example.test", "acct")
+// A gateway key is only applied to a domain the account is allowed to send
+// from. This is the end-to-end version of the isolation: a real SMTP session,
+// and no signature at the other end.
+func TestAccountCannotHaveAnUnauthorizedDomainSigned(t *testing.T) {
+	victimKey, victimLookup := dkimTestKey(t, "rsa", "victim.test", "mail")
 	gw := newTestGateway(t, func(cfg *Config) {
-		cfg.DKIM = []DKIMKey{gatewayKey}
-		cfg.Accounts[0].DKIM = []DKIMKey{accountKey}
+		cfg.DKIM = []DKIMKey{victimKey}
+		cfg.Accounts[0].AllowedSenders = []string{"*@tenant.test"}
 	})
 
 	c := gw.dialSubmission(t)
 	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
 		t.Fatalf("AUTH: %v", err)
 	}
-	if err := c.SendMail("app@example.test", []string{"dest@example.test"},
-		strings.NewReader("From: app@example.test\r\nSubject: signed\r\n\r\nbody\r\n")); err != nil {
+	// The envelope is legitimate for this account, so the message is accepted —
+	// but the From header names the victim's domain, and nothing must be signed
+	// for it.
+	err := c.SendMail("app@tenant.test", []string{"dest@example.test"},
+		strings.NewReader("From: ceo@victim.test\r\nSubject: spoofed\r\n\r\nbody\r\n"))
+	if err == nil {
+		msgs := gw.upstream.received()
+		if len(msgs) != 1 {
+			t.Fatalf("upstream got %d messages", len(msgs))
+		}
+		verifications, verifyErr := dkim.VerifyWithOptions(bytes.NewReader(msgs[0].Data),
+			&dkim.VerifyOptions{LookupTXT: victimLookup})
+		if verifyErr == nil && len(verifications) > 0 && verifications[0].Err == nil {
+			t.Fatal("the gateway signed for a domain the account may not send from")
+		}
+		return
+	}
+	// Refusing the forged From outright is also a correct answer, and the one
+	// the default policy gives.
+	if !strings.Contains(err.Error(), "550") {
+		t.Fatalf("want a 550 for the forged From header, got %v", err)
+	}
+	if len(gw.upstream.received()) != 0 {
+		t.Fatal("a message with a forged From header reached the upstream")
+	}
+}
+
+// An account that declared its senders may only use them.
+func TestEnvelopeSenderPolicyIsEnforced(t *testing.T) {
+	gw := newTestGateway(t, func(cfg *Config) {
+		cfg.Accounts[0].AllowedSenders = []string{"app@tenant.test", "*@mail.tenant.test"}
+	})
+	c := gw.dialSubmission(t)
+	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
+		t.Fatalf("AUTH: %v", err)
+	}
+
+	// Refused, permanently: retrying will not change the account's configuration.
+	err := c.Mail("someone@elsewhere.test", nil)
+	if err == nil {
+		t.Fatal("an undeclared envelope sender was accepted")
+	}
+	if !strings.Contains(err.Error(), "550") {
+		t.Fatalf("want a permanent 550, got %v", err)
+	}
+
+	// And the declared ones work.
+	for _, sender := range []string{"app@tenant.test", "bounces@mail.tenant.test"} {
+		if err := c.Mail(sender, nil); err != nil {
+			t.Fatalf("declared sender %q was refused: %v", sender, err)
+		}
+		if err := c.Reset(); err != nil {
+			t.Fatalf("RSET: %v", err)
+		}
+	}
+}
+
+// The From header is what the recipient sees, so a legitimate envelope does not
+// buy the right to forge it.
+func TestForgedHeaderFromIsRefused(t *testing.T) {
+	gw := newTestGateway(t, func(cfg *Config) {
+		cfg.Accounts[0].AllowedSenders = []string{"*@tenant.test"}
+	})
+	c := gw.dialSubmission(t)
+	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
+		t.Fatalf("AUTH: %v", err)
+	}
+	err := c.SendMail("app@tenant.test", []string{"dest@example.test"},
+		strings.NewReader("From: ceo@victim.test\r\nSubject: spoofed\r\n\r\nbody\r\n"))
+	if err == nil {
+		t.Fatal("a forged From header was accepted")
+	}
+	if !strings.Contains(err.Error(), "550") {
+		t.Fatalf("want a 550, got %v", err)
+	}
+	if len(gw.upstream.received()) != 0 {
+		t.Fatal("the forged message reached the upstream")
+	}
+}
+
+// Some applications legitimately relay on behalf of arbitrary addresses; they
+// can opt out of the header check without opting out of the envelope one.
+func TestSkipHeaderFromCheckAllowsAnyFromHeader(t *testing.T) {
+	gw := newTestGateway(t, func(cfg *Config) {
+		cfg.Accounts[0].AllowedSenders = []string{"*@tenant.test"}
+		cfg.Accounts[0].SkipHeaderFromCheck = true
+	})
+	c := gw.dialSubmission(t)
+	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
+		t.Fatalf("AUTH: %v", err)
+	}
+	if err := c.SendMail("app@tenant.test", []string{"dest@example.test"},
+		strings.NewReader("From: customer@anywhere.test\r\nSubject: relayed\r\n\r\nbody\r\n")); err != nil {
 		t.Fatalf("SendMail: %v", err)
 	}
-	msgs := gw.upstream.received()
-	if len(msgs) != 1 {
-		t.Fatalf("upstream got %d messages", len(msgs))
+	if len(gw.upstream.received()) != 1 {
+		t.Fatal("message not relayed")
 	}
-	// Only the account's selector verifies, which proves its key was used.
-	verifications, err := dkim.VerifyWithOptions(bytes.NewReader(msgs[0].Data),
-		&dkim.VerifyOptions{LookupTXT: accountLookup})
-	if err != nil || len(verifications) != 1 || verifications[0].Err != nil {
-		t.Fatalf("account key did not sign the message: %v %+v", err, verifications)
+	// The envelope is still policed.
+	if err := c.Mail("someone@elsewhere.test", nil); err == nil {
+		t.Fatal("skipping the header check must not open the envelope")
+	}
+}
+
+// An account with no declared sender keeps working, unchanged: that is what
+// makes the policy adoptable rather than a flag day.
+func TestAccountWithoutPolicyStillRelays(t *testing.T) {
+	gw := newTestGateway(t)
+	c := gw.dialSubmission(t)
+	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
+		t.Fatalf("AUTH: %v", err)
+	}
+	if err := c.SendMail("anything@anywhere.test", []string{"dest@example.test"},
+		strings.NewReader("From: anything@anywhere.test\r\nSubject: free\r\n\r\nbody\r\n")); err != nil {
+		t.Fatalf("SendMail: %v", err)
+	}
+	if len(gw.upstream.received()) != 1 {
+		t.Fatal("message not relayed")
+	}
+}
+
+// One tenant's broken account must not stop the relay for everyone. This is the
+// regression test for a real denial of service: newSnapshot used to fail
+// wholesale on a single bad account, so the gateway would not even start.
+func TestBrokenAccountDoesNotStopTheGateway(t *testing.T) {
+	gw := newTestGateway(t, func(cfg *Config) {
+		cfg.Accounts = append(cfg.Accounts,
+			// No hash: unusable, and previously fatal for the whole process.
+			Account{Username: "broken.app"},
+			// Duplicate of the working account.
+			Account{Username: testAccount, PasswordHash: "$2a$12$whatever"},
+		)
+	})
+
+	c := gw.dialSubmission(t)
+	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
+		t.Fatalf("the working account can no longer authenticate: %v", err)
+	}
+	if err := c.SendMail("app@example.test", []string{"dest@example.test"},
+		strings.NewReader("Subject: still working\r\n\r\nbody\r\n")); err != nil {
+		t.Fatalf("SendMail: %v", err)
+	}
+	if len(gw.upstream.received()) != 1 {
+		t.Fatal("message not relayed")
+	}
+}
+
+func TestPartitionAccounts(t *testing.T) {
+	cfg := &Config{Accounts: []Account{
+		{Username: "good", PasswordHash: "$2a$12$x"},
+		{Username: "", PasswordHash: "$2a$12$x"},
+		{Username: "nohash"},
+		{Username: "good", PasswordHash: "$2a$12$y"},
+	}}
+	served, rejected := cfg.PartitionAccounts()
+	if len(served) != 1 || served[0].Username != "good" {
+		t.Fatalf("served = %+v", served)
+	}
+	if len(rejected) != 3 {
+		t.Fatalf("rejected = %+v", rejected)
+	}
+	reasons := map[string]string{}
+	for _, r := range rejected {
+		reasons[r.Username] = r.Reason
+	}
+	if reasons["accounts[1]"] != "username is required" ||
+		reasons["nohash"] != "passwordHash is required" ||
+		reasons["good"] != "duplicate username" {
+		t.Fatalf("reasons = %v", reasons)
 	}
 }

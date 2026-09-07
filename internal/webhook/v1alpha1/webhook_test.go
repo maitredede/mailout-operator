@@ -11,6 +11,7 @@ import (
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 // validGateway is the minimum a gateway needs to be admitted.
@@ -252,5 +253,80 @@ func TestAccountRefusedWhenSecretExistsAndIsNotOurs(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "would overwrite") {
 		t.Fatalf("unexpected message: %v", err)
+	}
+}
+
+func TestAccountAllowedSendersValidation(t *testing.T) {
+	if err := createGateway(t, validGateway("senders")); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	ns := newNamespace(t, "tenant")
+
+	makeAccount := func(name string, senders []string) *v1alpha1.MailoutAccount {
+		return &v1alpha1.MailoutAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: v1alpha1.MailoutAccountSpec{
+				GatewayRef:     v1alpha1.GatewayReference{Name: "senders"},
+				SecretRef:      v1alpha1.LocalObjectReference{Name: name + "-smtp"},
+				AllowedSenders: senders,
+			},
+		}
+	}
+
+	if err := testClient.Create(t.Context(), makeAccount("valid",
+		[]string{"app@example.test", "*@mail.example.test"})); err != nil {
+		t.Fatalf("a valid allowedSenders list was refused: %v", err)
+	}
+
+	// A malformed entry is refused rather than silently ignored: dropping it
+	// would narrow the policy in a way the author did not ask for, and they
+	// would discover it as mail being refused.
+	tests := map[string][]string{
+		"no-at":           {"example.test"},
+		"no-local":        {"@example.test"},
+		"no-domain":       {"app@"},
+		"partial-local":   {"app*@example.test"},
+		"wildcard-domain": {"*@*.example.test"},
+		"duplicate":       {"app@example.test", "APP@example.test"},
+	}
+	for name, senders := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := testClient.Create(t.Context(), makeAccount(name, senders)); err == nil {
+				t.Fatalf("allowedSenders %v was admitted", senders)
+			}
+		})
+	}
+}
+
+// The removed per-account DKIM field must not come back by accident. Sent as an
+// unknown field, the API server prunes it — what matters is that it does not
+// survive, since it used to let a tenant name any Secret of the operator's
+// namespace for mounting.
+func TestAccountDKIMFieldIsPruned(t *testing.T) {
+	if err := createGateway(t, validGateway("prunedkim")); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	ns := newNamespace(t, "tenant")
+
+	account := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "mailout.daly.nc/v1alpha1",
+		"kind":       "MailoutAccount",
+		"metadata":   map[string]any{"name": "sneaky", "namespace": ns},
+		"spec": map[string]any{
+			"gatewayRef":     map[string]any{"name": "prunedkim"},
+			"secretRef":      map[string]any{"name": "sneaky-smtp"},
+			"allowedSenders": []any{"app@tenant.test"},
+			"dkim": []any{map[string]any{
+				"domain":              "victim.test",
+				"selector":            "mail",
+				"privateKeySecretRef": map[string]any{"name": "upstream-credentials"},
+			}},
+		},
+	}}
+	if err := testClient.Create(t.Context(), account); err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if _, found, _ := unstructured.NestedSlice(account.Object, "spec", "dkim"); found {
+		t.Fatal("spec.dkim survived; a tenant could still name a Secret to mount")
 	}
 }

@@ -48,8 +48,11 @@ type Account struct {
 	Username     string
 	PasswordHash string
 	Disabled     bool
-	// DKIM overrides the gateway's keys for this account.
-	DKIM []v1alpha1.DKIMKeySpec
+	// AllowedSenders are the addresses and domains this account may send from.
+	// Empty leaves the envelope unrestricted and disables signing entirely.
+	AllowedSenders []string
+	// SkipHeaderFromCheck limits the sender policy to the envelope.
+	SkipHeaderFromCheck bool
 	// DisableMilters names gateway filters this account opts out of.
 	DisableMilters []string
 }
@@ -89,18 +92,23 @@ func GatewayConfig(in Input) (*gateway.Config, error) {
 		TLS:       renderTLS(gw),
 		Upstream:  renderUpstream(gw.Spec.Upstream, in),
 		Milters:   renderMilters(gw.Spec.Milters),
-		DKIM:      renderDKIM(gw.Spec.DKIM),
+	}
+	// An upstream that signs for us must be left to it: two signatures would
+	// mean ours breaking as soon as the service rewrites the body.
+	if !gw.Spec.Upstream.HandlesDKIM {
+		cfg.DKIM = renderDKIM(gw.Spec.DKIM)
 	}
 
 	accounts := append([]Account(nil), in.Accounts...)
 	sort.Slice(accounts, func(i, j int) bool { return accounts[i].Username < accounts[j].Username })
 	for _, acct := range accounts {
 		cfg.Accounts = append(cfg.Accounts, gateway.Account{
-			Username:       acct.Username,
-			PasswordHash:   acct.PasswordHash,
-			Disabled:       acct.Disabled,
-			DKIM:           renderDKIM(acct.DKIM),
-			DisableMilters: acct.DisableMilters,
+			Username:            acct.Username,
+			PasswordHash:        acct.PasswordHash,
+			Disabled:            acct.Disabled,
+			AllowedSenders:      acct.AllowedSenders,
+			SkipHeaderFromCheck: acct.SkipHeaderFromCheck,
+			DisableMilters:      acct.DisableMilters,
 		})
 	}
 	return cfg, nil
@@ -245,7 +253,11 @@ func DKIMKeyName(spec v1alpha1.DKIMKeySpec) string {
 }
 
 // DKIMSecretNames lists every Secret holding a key this gateway signs with,
-// account overrides included, deduplicated and ordered.
+// deduplicated and ordered.
+//
+// Only the gateway's own keys are considered. Accounts used to be able to name a
+// Secret here, which let a tenant mount any Secret of the operator's namespace
+// into the gateway pod — and sign for somebody else's domain with it.
 func DKIMSecretNames(gw *v1alpha1.MailoutGateway, accounts []Account) []string {
 	seen := map[string]bool{}
 	var names []string
@@ -259,11 +271,10 @@ func DKIMSecretNames(gw *v1alpha1.MailoutGateway, accounts []Account) []string {
 			names = append(names, name)
 		}
 	}
-	if gw != nil {
+	// Nothing is mounted when the upstream signs for us: a private key in a pod
+	// that never reads it is exposure for nothing.
+	if gw != nil && !gw.Spec.Upstream.HandlesDKIM {
 		add(gw.Spec.DKIM)
-	}
-	for _, acct := range accounts {
-		add(acct.DKIM)
 	}
 	sort.Strings(names)
 	return names

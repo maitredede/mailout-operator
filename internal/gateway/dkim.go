@@ -75,11 +75,21 @@ func (s *dkimSigner) empty() bool { return len(s.byDomain) == 0 }
 // sign adds a DKIM-Signature header in place. A message whose domain has no key
 // is left alone: signing it under some other domain would break DMARC
 // alignment, which is worse than not signing at all.
-func (s *dkimSigner) sign(msg *Message) error {
+//
+// The policy has the last word. A key existing on the gateway is not authority
+// to use it: without this check, any account could have any of the gateway's
+// domains signed simply by claiming to send from it — one tenant vouching for
+// another.
+func (s *dkimSigner) sign(msg *Message, policy *senderPolicy) error {
 	key := s.keyFor(msg)
 	if key == nil {
 		s.log.Debug("no DKIM key for this sender, not signing",
 			"from", msg.From, "account", msg.Account)
+		return nil
+	}
+	if !policy.canSign(key.domain) {
+		s.log.Warn("refusing to sign for a domain this account is not allowed to send from",
+			"domain", key.domain, "account", msg.Account, "from", msg.From)
 		return nil
 	}
 	opts := &dkim.SignOptions{

@@ -321,12 +321,15 @@ func (in *MailoutAccountSpec) DeepCopyInto(out *MailoutAccountSpec) {
 	*out = *in
 	out.GatewayRef = in.GatewayRef
 	out.SecretRef = in.SecretRef
-	if in.DKIM != nil {
-		in, out := &in.DKIM, &out.DKIM
-		*out = make([]DKIMKeySpec, len(*in))
-		for i := range *in {
-			(*in)[i].DeepCopyInto(&(*out)[i])
-		}
+	if in.AllowedSenders != nil {
+		in, out := &in.AllowedSenders, &out.AllowedSenders
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.EnforceHeaderFrom != nil {
+		in, out := &in.EnforceHeaderFrom, &out.EnforceHeaderFrom
+		*out = new(bool)
+		**out = **in
 	}
 	in.Milters.DeepCopyInto(&out.Milters)
 }

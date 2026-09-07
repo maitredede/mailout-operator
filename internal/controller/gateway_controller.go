@@ -159,11 +159,12 @@ func (r *GatewayReconciler) collectAccounts(ctx context.Context, gw *v1alpha1.Ma
 		}
 
 		accounts = append(accounts, render.Account{
-			Username:       UsernameFor(account),
-			PasswordHash:   hash,
-			Disabled:       account.Spec.Disabled,
-			DKIM:           account.Spec.DKIM,
-			DisableMilters: account.Spec.Milters.Disable,
+			Username:            UsernameFor(account),
+			PasswordHash:        hash,
+			Disabled:            account.Spec.Disabled,
+			AllowedSenders:      account.Spec.AllowedSenders,
+			SkipHeaderFromCheck: account.Spec.EnforceHeaderFrom != nil && !*account.Spec.EnforceHeaderFrom,
+			DisableMilters:      account.Spec.Milters.Disable,
 		})
 	}
 	return accounts, nil

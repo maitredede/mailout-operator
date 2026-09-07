@@ -100,9 +100,22 @@ type Account struct {
 	// dataplane.
 	PasswordHash string `json:"passwordHash"`
 	Disabled     bool   `json:"disabled,omitempty"`
-	// DKIM, when set, replaces the gateway's signing keys for this account.
+	// AllowedSenders lists the addresses this account may send from, as an
+	// exact address (app@example.com) or a whole domain (*@example.com).
+	//
+	// Empty means no restriction on the envelope — and no signature at all:
+	// declaring a sender is what earns a DKIM signature, because signing a
+	// domain vouches for it, and an account must not vouch for a domain it may
+	// not send from.
 	// +optional
-	DKIM []DKIMKey `json:"dkim,omitempty"`
+	AllowedSenders []string `json:"allowedSenders,omitempty"`
+	// SkipHeaderFromCheck stops the policy from being applied to the From
+	// header, leaving it on the envelope only. Off by default, so the safe
+	// behaviour is the zero value: an account that passes the envelope check
+	// but forges its From header would still show a forged sender to the
+	// recipient, DMARC alignment failure notwithstanding.
+	// +optional
+	SkipHeaderFromCheck bool `json:"skipHeaderFromCheck,omitempty"`
 	// DisableMilters names gateway filters to skip for this account, by name.
 	// Filters can only be switched off, never added: an account must not be
 	// able to route its mail through a filter of its own choosing.
@@ -126,6 +139,43 @@ const (
 	defaultWriteTimeout    = 60 * time.Second
 	defaultUpstreamTimeout = 60 * time.Second
 )
+
+// RejectedAccount is an account left out of the served configuration, with the
+// reason to report.
+type RejectedAccount struct {
+	Username string
+	Reason   string
+}
+
+// PartitionAccounts splits the accounts into those that can be served and those
+// that cannot. Being permissive about the set while being strict about each
+// member is what keeps one tenant's mistake to itself.
+func (c *Config) PartitionAccounts() (served []Account, rejected []RejectedAccount) {
+	seen := map[string]bool{}
+	for i, account := range c.Accounts {
+		switch {
+		case account.Username == "":
+			rejected = append(rejected, RejectedAccount{
+				Username: fmt.Sprintf("accounts[%d]", i),
+				Reason:   "username is required",
+			})
+		case seen[account.Username]:
+			rejected = append(rejected, RejectedAccount{
+				Username: account.Username,
+				Reason:   "duplicate username",
+			})
+		case account.PasswordHash == "":
+			rejected = append(rejected, RejectedAccount{
+				Username: account.Username,
+				Reason:   "passwordHash is required",
+			})
+		default:
+			seen[account.Username] = true
+			served = append(served, account)
+		}
+	}
+	return served, rejected
+}
 
 // Duration is a time.Duration that marshals as a Go duration string ("30s"),
 // so that it survives the YAML-to-JSON round trip sigs.k8s.io/yaml performs.
@@ -196,9 +246,13 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// Validate reports every problem that would make the snapshot unservable.
-// Accounts are checked too: a single malformed account must not be able to take
-// the whole gateway down, so callers may prefer Config.dropInvalidAccounts.
+// Validate reports every problem that would make the snapshot unservable —
+// listeners, certificates, upstream, filters: what is common to every account.
+//
+// Accounts are deliberately NOT validated here. They are checked one by one by
+// PartitionAccounts, because a single malformed account must never stop the
+// relay for all the others: on a shared gateway that would let one tenant deny
+// service to the rest.
 func (c *Config) Validate() error {
 	var errs []string
 	if len(c.Listeners) == 0 {
@@ -241,20 +295,6 @@ func (c *Config) Validate() error {
 	default:
 		errs = append(errs, fmt.Sprintf("upstream.tls must be one of %q, %q, %q; got %q",
 			TLSModeSTARTTLS, TLSModeImplicit, TLSModeNone, c.Upstream.TLS))
-	}
-	seenAccount := map[string]bool{}
-	for i, a := range c.Accounts {
-		if a.Username == "" {
-			errs = append(errs, fmt.Sprintf("accounts[%d]: username is required", i))
-			continue
-		}
-		if seenAccount[a.Username] {
-			errs = append(errs, fmt.Sprintf("accounts[%d]: duplicate username %q", i, a.Username))
-		}
-		seenAccount[a.Username] = true
-		if a.PasswordHash == "" {
-			errs = append(errs, fmt.Sprintf("account %q: passwordHash is required", a.Username))
-		}
 	}
 	for i, m := range c.Milters {
 		if _, _, err := m.ParseAddress(); err != nil {

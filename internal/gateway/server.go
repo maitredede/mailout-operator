@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,7 +23,11 @@ import (
 // once and replaced wholesale, so a session always works against a consistent
 // view even while a reload happens.
 type snapshot struct {
-	config   *Config
+	config *Config
+	// rejected lists the accounts left out of this snapshot and why. They are
+	// reported rather than fatal: one tenant's broken account must not stop the
+	// relay for everyone.
+	rejected []RejectedAccount
 	accounts *accountStore
 	certs    *certStore
 	relay    *relayer
@@ -36,7 +41,10 @@ type snapshot struct {
 // accountPolicy is what applies to one account's messages.
 type accountPolicy struct {
 	milters *milterChain
-	dkim    *dkimSigner
+	// senders decides which addresses the account may use, and therefore which
+	// domains may be signed on its behalf.
+	senders             *senderPolicy
+	skipHeaderFromCheck bool
 }
 
 func newSnapshot(cfg *Config, log *slog.Logger) (*snapshot, error) {
@@ -60,39 +68,44 @@ func newSnapshot(cfg *Config, log *slog.Logger) (*snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	served, rejected := cfg.PartitionAccounts()
+	for _, account := range rejected {
+		log.Error("account not served", "account", account.Username, "reason", account.Reason)
+	}
+
 	snap := &snapshot{
 		config:   cfg,
-		accounts: newAccountStore(cfg.Accounts),
+		rejected: rejected,
+		accounts: newAccountStore(served),
 		certs:    certs,
 		relay:    relay,
 		milters:  milters,
 		dkim:     signer,
-		policies: make(map[string]accountPolicy, len(cfg.Accounts)),
+		policies: make(map[string]accountPolicy, len(served)),
 	}
-	for _, acct := range cfg.Accounts {
-		policy := accountPolicy{milters: milters, dkim: signer}
+	for _, acct := range served {
+		policy := accountPolicy{
+			milters:             milters,
+			senders:             newSenderPolicy(acct.AllowedSenders),
+			skipHeaderFromCheck: acct.SkipHeaderFromCheck,
+		}
 		if len(acct.DisableMilters) > 0 {
 			policy.milters = milters.without(acct.DisableMilters)
-		}
-		if len(acct.DKIM) > 0 {
-			accountSigner, err := newDKIMSigner(acct.DKIM, log)
-			if err != nil {
-				return nil, fmt.Errorf("account %s: %w", acct.Username, err)
-			}
-			policy.dkim = accountSigner
 		}
 		snap.policies[acct.Username] = policy
 	}
 	return snap, nil
 }
 
-// policyFor returns what applies to an account, falling back to the gateway's
-// own filters and keys.
+// policyFor returns what applies to an account. An account absent from the
+// snapshot cannot authenticate in the first place, so the fallback is the
+// strictest thing that still makes sense: the gateway's filters, and a policy
+// that signs nothing.
 func (s *snapshot) policyFor(username string) accountPolicy {
 	if policy, ok := s.policies[username]; ok {
 		return policy
 	}
-	return accountPolicy{milters: s.milters, dkim: s.dkim}
+	return accountPolicy{milters: s.milters, senders: newSenderPolicy(nil)}
 }
 
 // Server is the SMTP dataplane. Its configuration can be replaced at runtime
@@ -141,7 +154,8 @@ func (s *Server) Reload(cfg *Config) error {
 	}
 	s.current.Store(snap)
 	s.log.Info("configuration loaded",
-		"accounts", len(snap.config.Accounts),
+		"accounts", len(snap.accounts.byUsername),
+		"accountsRejected", len(snap.rejected),
 		"certificates", len(snap.config.TLS.Certificates),
 		"milters", len(snap.config.Milters),
 		"dkimKeys", len(snap.config.DKIM),
@@ -307,9 +321,25 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 	if s.account == nil {
 		return smtp.ErrAuthRequired
 	}
+	policy := s.snap.policyFor(s.account.Username)
+	if !policy.senders.allows(from) {
+		s.server.log.Warn("envelope sender refused",
+			"account", s.account.Username, "from", from, "remote", s.remoteAddr())
+		return errSenderNotAllowed(from)
+	}
 	s.from = from
 	s.to = nil
 	return nil
+}
+
+// errSenderNotAllowed is a permanent refusal: the account is not configured for
+// this sender, and retrying will not change that.
+func errSenderNotAllowed(address string) *smtp.SMTPError {
+	return &smtp.SMTPError{
+		Code:         550,
+		EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+		Message:      fmt.Sprintf("Sender %s is not allowed for this account", address),
+	}
 }
 
 func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
@@ -345,6 +375,17 @@ func (s *session) Data(r io.Reader) error {
 
 	policy := s.snap.policyFor(s.account.Username)
 
+	// The From header is what the recipient sees, so it is checked too: an
+	// envelope that passes while the header is forged still shows a forged
+	// sender, whether or not DMARC alignment catches it downstream.
+	if !policy.skipHeaderFromCheck && !policy.senders.empty() {
+		if err := checkHeaderFrom(msg.Data, policy.senders); err != nil {
+			s.server.log.Warn("From header refused",
+				"account", s.account.Username, "envelope", msg.From, "remote", s.remoteAddr())
+			return err
+		}
+	}
+
 	// Filters run before signing, so that DKIM covers the body the filters
 	// actually left behind.
 	if !policy.milters.empty() {
@@ -361,8 +402,8 @@ func (s *session) Data(r io.Reader) error {
 	}
 
 	// Signed last, so the signature covers what the filters left behind.
-	if !policy.dkim.empty() {
-		if err := policy.dkim.sign(msg); err != nil {
+	if !s.snap.dkim.empty() {
+		if err := s.snap.dkim.sign(msg, policy.senders); err != nil {
 			s.server.log.Error("DKIM signing failed", "account", msg.Account, "err", err)
 			return &smtp.SMTPError{
 				Code:         451,
@@ -384,6 +425,27 @@ func (s *session) Data(r io.Reader) error {
 	s.server.log.Info("relayed",
 		"account", msg.Account, "from", msg.From, "rcpt", len(msg.To),
 		"bytes", len(msg.Data), "took", time.Since(start))
+	return nil
+}
+
+// checkHeaderFrom applies the sender policy to the message's From header. A
+// message with no From header is left alone: that is a malformed message, not a
+// spoofing attempt, and the upstream is entitled to its own opinion on it.
+func checkHeaderFrom(data []byte, policy *senderPolicy) error {
+	parsed, err := parseMessage(data)
+	if err != nil {
+		// Unparsable here means unparsable for the upstream too; let it decide.
+		return nil
+	}
+	for _, header := range parsed.Headers {
+		if !strings.EqualFold(header.Name, "From") {
+			continue
+		}
+		if !policy.allows(header.Value) {
+			return errSenderNotAllowed(strings.TrimSpace(header.Value))
+		}
+		return nil
+	}
 	return nil
 }
 

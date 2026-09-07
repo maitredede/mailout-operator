@@ -58,7 +58,17 @@ func (v *AccountValidator) ValidateDelete(context.Context, *v1alpha1.MailoutAcco
 
 func (v *AccountValidator) validate(ctx context.Context, account *v1alpha1.MailoutAccount) (admission.Warnings, error) {
 	var errs field.ErrorList
+	var warnings admission.Warnings
 	spec := field.NewPath("spec")
+
+	if len(account.Spec.AllowedSenders) == 0 {
+		warnings = append(warnings, "spec.allowedSenders is empty: this account may send from "+
+			"any address, and its mail will not be DKIM-signed at all")
+	}
+	if account.Spec.EnforceHeaderFrom != nil && !*account.Spec.EnforceHeaderFrom {
+		warnings = append(warnings, "spec.enforceHeaderFrom is false: this account may put any "+
+			"address in the From header its recipients will see")
+	}
 
 	gatewayNamespace := controller.GatewayNamespaceFor(account, v.OperatorNamespace)
 	gatewayKey := client.ObjectKey{Namespace: gatewayNamespace, Name: account.Spec.GatewayRef.Name}
@@ -77,13 +87,13 @@ func (v *AccountValidator) validate(ctx context.Context, account *v1alpha1.Mailo
 		errs = append(errs, v.validateAgainstGateway(ctx, account, &gw, spec)...)
 	}
 
-	errs = append(errs, validateDKIM(account.Spec.DKIM, spec.Child("dkim"))...)
+	errs = append(errs, validateAllowedSenders(account.Spec.AllowedSenders, spec.Child("allowedSenders"))...)
 	errs = append(errs, v.validateSecretRef(ctx, account, spec.Child("secretRef"))...)
 
 	if len(errs) > 0 {
-		return nil, apierrors.NewInvalid(account.GroupVersionKind().GroupKind(), account.Name, errs)
+		return warnings, apierrors.NewInvalid(account.GroupVersionKind().GroupKind(), account.Name, errs)
 	}
-	return nil, nil
+	return warnings, nil
 }
 
 // validateAgainstGateway checks what only the gateway can answer: whether this

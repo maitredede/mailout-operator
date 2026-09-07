@@ -12,6 +12,11 @@ spec:
     # namespace defaults to the operator's namespace
   secretRef:
     name: invoicing-smtp
+  # What this account may put in MAIL FROM and in the From header — and the only
+  # domains it can have DKIM-signed. Leave it out and mail relays from anywhere,
+  # unsigned.
+  allowedSenders:
+    - "*@example.com"
   # Change this value to rotate the password.
   rotation: "2026-09-07"
 ---

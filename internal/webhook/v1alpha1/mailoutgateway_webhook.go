@@ -88,6 +88,10 @@ func (v *GatewayValidator) validate(gw *v1alpha1.MailoutGateway) (admission.Warn
 		warnings = append(warnings, "spec.upstream.insecureSkipVerify is set: the upstream certificate "+
 			"is not verified, so the connection can be intercepted")
 	}
+	if gw.Spec.Upstream.HandlesDKIM && len(gw.Spec.DKIM) > 0 {
+		warnings = append(warnings, "spec.upstream.handlesDKIM is set, so the "+
+			"spec.dkim keys are declared but not used: the upstream signs instead")
+	}
 	for i, m := range gw.Spec.Milters {
 		if m.FailOpen {
 			warnings = append(warnings, fmt.Sprintf(
@@ -187,6 +191,41 @@ func validateMilters(milters []v1alpha1.MilterSpec, path *field.Path) field.Erro
 		// exactly what the gateway can dial.
 		if _, _, err := (gateway.Milter{Address: m.Address}).ParseAddress(); err != nil {
 			errs = append(errs, field.Invalid(path.Index(i).Child("address"), m.Address, err.Error()))
+		}
+	}
+	return errs
+}
+
+// validateAllowedSenders checks each entry is an exact address or a *@domain
+// wildcard. A malformed entry is refused rather than ignored: silently dropping
+// it would narrow the policy in a way the author did not ask for, and they would
+// discover it as mail being refused.
+func validateAllowedSenders(senders []string, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	seen := map[string]bool{}
+	for i, entry := range senders {
+		normalized := strings.ToLower(strings.TrimSpace(entry))
+		if seen[normalized] {
+			errs = append(errs, field.Duplicate(path.Index(i), entry))
+		}
+		seen[normalized] = true
+
+		local, domain, found := strings.Cut(normalized, "@")
+		switch {
+		case !found:
+			errs = append(errs, field.Invalid(path.Index(i), entry,
+				"must be an address (app@example.com) or a domain (*@example.com)"))
+		case local == "":
+			errs = append(errs, field.Invalid(path.Index(i), entry,
+				"missing the local part; use *@example.com for a whole domain"))
+		case domain == "":
+			errs = append(errs, field.Invalid(path.Index(i), entry, "missing the domain"))
+		case strings.Contains(local, "*") && local != "*":
+			errs = append(errs, field.Invalid(path.Index(i), entry,
+				"a wildcard local part must be exactly *, partial matches are not supported"))
+		case strings.Contains(domain, "*"):
+			errs = append(errs, field.Invalid(path.Index(i), entry,
+				"wildcards are not supported in the domain; list each domain"))
 		}
 	}
 	return errs

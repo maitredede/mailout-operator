@@ -130,6 +130,22 @@ type UpstreamSpec struct {
 	// +optional
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 
+	// HandlesDKIM declares that the upstream signs outgoing mail itself — the
+	// case for Mailgun, SES, SendGrid, Postmark and most sending services, which
+	// sign with the key of the domain delegated to them.
+	//
+	// When set, this gateway signs nothing, even if spec.dkim declares keys.
+	// Signing anyway would produce two signatures, and ours would break: these
+	// services rewrite the body (link tracking, unsubscribe footers) after
+	// receiving it, so our signature would arrive invalid and show up as
+	// dkim=fail in DMARC reports for no benefit.
+	//
+	// Keeping the keys declared while this is set is the point: switching a
+	// gateway to a sending service, or back, is one boolean rather than deleting
+	// and recreating configuration.
+	// +optional
+	HandlesDKIM bool `json:"handlesDKIM,omitempty"`
+
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 }

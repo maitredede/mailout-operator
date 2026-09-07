@@ -31,13 +31,16 @@ func dkimTestKey(t *testing.T, algorithm, domain, selector string) (DKIMKey, fun
 	}, lookup
 }
 
-func signedMessage(t *testing.T, keys []DKIMKey, msg *Message) *Message {
+// signedMessage signs msg with the given keys, on behalf of an account allowed
+// to send from allowedSenders. The policy is not optional: a key on the gateway
+// is not authority to use it.
+func signedMessage(t *testing.T, keys []DKIMKey, msg *Message, allowedSenders ...string) *Message {
 	t.Helper()
 	signer, err := newDKIMSigner(keys, testLogger())
 	if err != nil {
 		t.Fatalf("newDKIMSigner: %v", err)
 	}
-	if err := signer.sign(msg); err != nil {
+	if err := signer.sign(msg, newSenderPolicy(allowedSenders)); err != nil {
 		t.Fatalf("sign: %v", err)
 	}
 	return msg
@@ -51,7 +54,7 @@ func TestDKIMSignatureVerifies(t *testing.T) {
 				From: "app@example.test",
 				To:   []string{"dest@elsewhere.test"},
 				Data: []byte("From: app@example.test\r\nSubject: signed\r\n\r\nbody\r\n"),
-			})
+			}, "*@example.test")
 
 			if !strings.Contains(string(msg.Data), "DKIM-Signature:") {
 				t.Fatalf("no signature added:\n%s", msg.Data)
@@ -81,7 +84,7 @@ func TestDKIMLeavesUnknownDomainUnsigned(t *testing.T) {
 	msg := signedMessage(t, []DKIMKey{key}, &Message{
 		From: "app@other.test",
 		Data: []byte("From: app@other.test\r\nSubject: hi\r\n\r\nbody\r\n"),
-	})
+	}, "*@other.test")
 	if strings.Contains(string(msg.Data), "DKIM-Signature:") {
 		t.Fatalf("message was signed under the wrong domain:\n%s", msg.Data)
 	}
@@ -94,7 +97,7 @@ func TestDKIMFallsBackToFromHeader(t *testing.T) {
 	msg := signedMessage(t, []DKIMKey{key}, &Message{
 		From: "",
 		Data: []byte("From: Application <app@example.test>\r\nSubject: hi\r\n\r\nbody\r\n"),
-	})
+	}, "*@example.test")
 	verifications, err := dkim.VerifyWithOptions(bytes.NewReader(msg.Data),
 		&dkim.VerifyOptions{LookupTXT: lookup})
 	if err != nil || len(verifications) != 1 || verifications[0].Err != nil {
@@ -135,5 +138,40 @@ func TestGeneratedDKIMRecordShape(t *testing.T) {
 	}
 	if !strings.HasPrefix(generated.DNSRecordValue, "v=DKIM1; k=rsa; p=") {
 		t.Fatalf("record value = %q", generated.DNSRecordValue)
+	}
+}
+
+// The core of the tenant isolation: a key existing on the gateway is not
+// authority to use it. Without this, any account could have any of the
+// gateway's domains signed by claiming to send from it — one tenant vouching
+// for another.
+func TestDKIMRefusesToSignAnUnauthorizedDomain(t *testing.T) {
+	key, lookup := dkimTestKey(t, "rsa", "victim.test", "mail")
+	msg := signedMessage(t, []DKIMKey{key}, &Message{
+		From:    "attacker@victim.test",
+		Account: "tenant-a.app",
+		Data:    []byte("From: attacker@victim.test\r\nSubject: spoofed\r\n\r\nbody\r\n"),
+	}, "*@attacker.test") // allowed on its own domain only
+
+	if strings.Contains(string(msg.Data), "DKIM-Signature:") {
+		t.Fatalf("signed a domain the account may not send from:\n%s", msg.Data)
+	}
+	verifications, err := dkim.VerifyWithOptions(bytes.NewReader(msg.Data),
+		&dkim.VerifyOptions{LookupTXT: lookup})
+	if err == nil && len(verifications) > 0 {
+		t.Fatalf("a signature was produced for victim.test: %+v", verifications)
+	}
+}
+
+// An account that declared nothing sends freely but is never signed: declaring
+// a sender is what earns a signature.
+func TestDKIMSignsNothingWithoutADeclaredSender(t *testing.T) {
+	key, _ := dkimTestKey(t, "rsa", "example.test", "mail")
+	msg := signedMessage(t, []DKIMKey{key}, &Message{
+		From: "app@example.test",
+		Data: []byte("From: app@example.test\r\nSubject: hi\r\n\r\nbody\r\n"),
+	})
+	if strings.Contains(string(msg.Data), "DKIM-Signature:") {
+		t.Fatalf("an account with no allowedSenders got its mail signed:\n%s", msg.Data)
 	}
 }

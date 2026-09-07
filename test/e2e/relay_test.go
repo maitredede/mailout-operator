@@ -16,8 +16,13 @@ import (
 	"github.com/emersion/go-smtp"
 )
 
-// send authenticates and submits one message, returning the server's verdict.
+// send authenticates as the signing account and submits one message.
 func (s *stack) send(t *testing.T, subject, from, body string) error {
+	return s.sendAs(t, testUsername, subject, from, body)
+}
+
+// sendAs submits as a given account, returning the server's verdict.
+func (s *stack) sendAs(t *testing.T, username, subject, from, body string) error {
 	t.Helper()
 	client, err := smtp.DialStartTLS(s.SubmissionAddr, &tls.Config{
 		ServerName: testCertName, RootCAs: s.CAPool, MinVersion: tls.VersionTLS12,
@@ -26,7 +31,7 @@ func (s *stack) send(t *testing.T, subject, from, body string) error {
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer client.Close()
-	if err := client.Auth(sasl.NewPlainClient("", testUsername, testPassword)); err != nil {
+	if err := client.Auth(sasl.NewPlainClient("", username, testPassword)); err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
 	message := fmt.Sprintf("From: %s\r\nTo: dest@elsewhere.test\r\nSubject: %s\r\n\r\n%s\r\n",
@@ -82,16 +87,36 @@ func TestRelayedMessageIsSigned(t *testing.T) {
 	}
 }
 
-// A sender the gateway has no key for goes out unsigned rather than mis-signed.
-func TestMessageFromUnknownDomainIsRelayedUnsigned(t *testing.T) {
+// An account that declared its senders may only use them, and the refusal is
+// permanent: nothing about retrying changes its configuration.
+func TestUndeclaredSenderIsRefused(t *testing.T) {
 	stack := newStack(t, newNetwork(t))
 
-	if err := stack.send(t, "e2e unsigned", "app@other.test", "no key for this domain"); err != nil {
+	err := stack.send(t, "e2e undeclared", "app@other.test", "not my domain")
+	if err == nil {
+		t.Fatal("an undeclared sender was accepted")
+	}
+	if !strings.Contains(err.Error(), "550") {
+		t.Fatalf("want a permanent 550, got %v", err)
+	}
+	if len(stack.Mailpit.messages(t)) != 0 {
+		t.Fatal("the refused message reached the upstream")
+	}
+}
+
+// An account with no policy still relays, from anywhere — and is signed
+// nowhere, even for a domain the gateway holds a key for. That is the trade:
+// declaring a sender is what earns a signature.
+func TestAccountWithoutPolicyRelaysUnsigned(t *testing.T) {
+	stack := newStack(t, newNetwork(t))
+
+	const subject = "e2e unsigned"
+	if err := stack.sendAs(t, openUsername, subject, "app@"+testDomain, "no policy declared"); err != nil {
 		t.Fatalf("submission refused: %v", err)
 	}
-	msg := stack.Mailpit.waitForMessage(t, "e2e unsigned", 15*time.Second)
+	msg := stack.Mailpit.waitForMessage(t, subject, 15*time.Second)
 	if raw := stack.Mailpit.raw(t, msg.ID); strings.Contains(raw, "DKIM-Signature:") {
-		t.Fatalf("a message was signed under a domain with no key:\n%s", raw)
+		t.Fatalf("an account with no declared sender got its mail signed:\n%s", raw)
 	}
 }
 

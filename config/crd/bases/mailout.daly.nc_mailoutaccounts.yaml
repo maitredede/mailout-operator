@@ -62,53 +62,35 @@ spec:
               generates the password, writes it to a Secret in this namespace, and keeps
               only its bcrypt hash — nothing but that Secret ever holds the cleartext.
             properties:
+              allowedSenders:
+                description: |-
+                  AllowedSenders lists the addresses this account may send from, either as
+                  an exact address (app@example.com) or as a whole domain (*@example.com).
+
+                  Empty places no restriction on the envelope — and disables DKIM signing
+                  for this account entirely. Declaring a sender is what earns a signature:
+                  a signature vouches for a domain, and an account must not be able to
+                  vouch for a domain it may not send from. This is also what stops one
+                  tenant from having another tenant's domain signed.
+                items:
+                  type: string
+                type: array
               disabled:
                 description: Disabled keeps the account and its Secret but refuses
                   authentication.
                 type: boolean
-              dkim:
-                description: DKIM overrides the gateway's signing keys for this account.
-                items:
-                  description: |-
-                    DKIMKeySpec is one DKIM signing key. Mail is signed only when its sender
-                    domain matches one of these; anything else is relayed unsigned rather than
-                    signed under a domain the operator does not own.
-                  properties:
-                    domain:
-                      description: Domain is the SDID, published in DNS as <selector>._domainkey.<domain>.
-                      minLength: 1
-                      type: string
-                    headerKeys:
-                      description: |-
-                        HeaderKeys restricts which headers are signed. Empty uses the library
-                        default, which is the right choice unless you know otherwise.
-                      items:
-                        type: string
-                      type: array
-                    privateKeySecretRef:
-                      description: |-
-                        PrivateKeySecretRef holds an RSA or Ed25519 key in PEM form. Key defaults
-                        to "private.key"; a Secret produced by cert-manager uses "tls.key".
-                      properties:
-                        key:
-                          description: Key defaults to the kind-specific key documented
-                            on each field.
-                          type: string
-                        name:
-                          minLength: 1
-                          type: string
-                      required:
-                      - name
-                      type: object
-                    selector:
-                      minLength: 1
-                      type: string
-                  required:
-                  - domain
-                  - privateKeySecretRef
-                  - selector
-                  type: object
-                type: array
+              enforceHeaderFrom:
+                default: true
+                description: |-
+                  EnforceHeaderFrom also applies allowedSenders to the message's From
+                  header, not just to the envelope. On by default: an account that passes
+                  the envelope check but forges its From header still shows a forged sender
+                  to the recipient, whether or not DMARC alignment catches it.
+
+                  Turn it off for an application that legitimately sends on behalf of
+                  arbitrary addresses — a ticketing system relaying a customer's reply, for
+                  instance.
+                type: boolean
               gatewayRef:
                 description: |-
                   GatewayReference points at the MailoutGateway an account uses. It may live in

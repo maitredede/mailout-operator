@@ -58,9 +58,25 @@ The decisions worth knowing about:
 - **A filter that is down stops the mail** (`451`, retry later) unless you set
   `failOpen`. A virus scanner that is unreachable must not turn the relay into a
   conduit for malware.
+- **An account may only send from what it declares.** `allowedSenders` lists its
+  addresses or domains, and the policy applies to the envelope *and* to the
+  `From` header the recipient sees. Declare nothing and mail still relays from
+  anywhere — but is never signed.
+- **Declaring a sender is what earns a DKIM signature.** A signature vouches for
+  a domain, so a key held by the gateway is not authority to use it: without
+  this, any account could have any of the gateway's domains signed simply by
+  claiming to send from it — one tenant vouching for another.
 - **DKIM signs after the filters**, so the signature covers the body and headers
   the filters actually left behind. Mail from a domain with no key goes out
   unsigned rather than signed under a domain you do not own.
+- **Let a sending service sign for itself.** Set `upstream.handlesDKIM` when
+  relaying through Mailgun, SES, SendGrid or the like: they sign with the key of
+  the domain delegated to them, and signing on top would produce a second
+  signature that breaks as soon as they rewrite the body for link tracking —
+  arriving as `dkim=fail` in your DMARC reports for no benefit.
+- **One tenant's mistake stays its own.** An account that cannot be served is
+  dropped from the configuration with the reason in its status; the relay keeps
+  running for everyone else.
 - **Adding an account does not restart anything.** The gateway reloads its
   accounts, keys and certificates from disk; only a change of listener or of
   mounted Secret rolls the pods.
@@ -118,6 +134,8 @@ spec:
     name: default
   secretRef:
     name: invoicing-smtp    # the operator creates and owns this Secret
+  allowedSenders:           # what this account may send from — and have signed
+    - "*@example.com"
 ```
 
 The application then reads `invoicing-smtp`, which carries `username`,
@@ -174,9 +192,9 @@ perfectly valid and still produce a container that will not start.
 
 ## Not there yet
 
-Prometheus metrics for the dataplane, per-account sender policy and rate
-limiting, `ReferenceGrant`-style per-account delegation, and a spool with
-bounces for clients that cannot retry.
+Prometheus metrics for the dataplane, per-account rate limiting,
+`ReferenceGrant`-style per-account delegation, and a spool with bounces for
+clients that cannot retry.
 
 ## License
 

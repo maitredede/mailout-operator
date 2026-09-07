@@ -7,10 +7,7 @@ package cluster
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +101,9 @@ func TestOperatorDeploysAWorkingRelay(t *testing.T) {
 		Spec: v1alpha1.MailoutAccountSpec{
 			GatewayRef: v1alpha1.GatewayReference{Name: "relay"},
 			SecretRef:  v1alpha1.LocalObjectReference{Name: "invoicing-smtp"},
+			// Declaring the sender is what earns the DKIM signature asserted
+			// below.
+			AllowedSenders: []string{"*@example.test"},
 		},
 	}
 	if err := c.Create(t.Context(), account); err != nil {
@@ -212,8 +212,17 @@ func TestOperatorDeploysAWorkingRelay(t *testing.T) {
 	}
 }
 
-// submit authenticates and sends one message, the way an application would.
+// submit sends one message with a From header matching its envelope, the way an
+// application would.
 func submit(t *testing.T, addr string, caPool *x509.CertPool, username, password, subject string) error {
+	t.Helper()
+	return submitAs(t, addr, caPool, username, password, subject, "app@example.test", "app@example.test")
+}
+
+// submitAs sends one message with the envelope sender and the From header set
+// independently, which is what a spoofing attempt looks like.
+func submitAs(t *testing.T, addr string, caPool *x509.CertPool, username, password,
+	subject, envelopeFrom, headerFrom string) error {
 	t.Helper()
 	client, err := smtp.DialStartTLS(addr, &tls.Config{
 		ServerName: gatewayCertName, RootCAs: caPool, MinVersion: tls.VersionTLS12,
@@ -225,22 +234,37 @@ func submit(t *testing.T, addr string, caPool *x509.CertPool, username, password
 	if err := client.Auth(sasl.NewPlainClient("", username, password)); err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
-	body := fmt.Sprintf("From: app@example.test\r\nTo: dest@elsewhere.test\r\nSubject: %s\r\n\r\nsent through the cluster\r\n", subject)
-	if err := client.SendMail("app@example.test", []string{"dest@elsewhere.test"},
+	body := fmt.Sprintf("From: %s\r\nTo: dest@elsewhere.test\r\nSubject: %s\r\n\r\nsent through the cluster\r\n",
+		headerFrom, subject)
+	if err := client.SendMail(envelopeFrom, []string{"dest@elsewhere.test"},
 		strings.NewReader(body)); err != nil {
 		return fmt.Errorf("send: %w", err)
 	}
 	return nil
 }
 
-// waitForSuccessfulSubmission retries until the credentials are accepted.
+// waitForSuccessfulSubmission retries until the credentials are accepted, with
+// a From matching the envelope.
 func waitForSuccessfulSubmission(t *testing.T, addr string, caPool *x509.CertPool,
 	username, password, subject string, timeout time.Duration) error {
+	t.Helper()
+	return waitForSuccessfulSubmissionAs(t, addr, caPool, username, password, subject,
+		"app@example.test", "app@example.test", timeout)
+}
+
+// waitForSuccessfulSubmissionAs retries a submission with explicit sender
+// addresses. Retrying is needed because a node port only becomes reachable once
+// kube-proxy has programmed the rule for the newly ready pod — a refusal by the
+// sender policy would simply be retried until the deadline, which is why the
+// callers that expect a refusal assert on a single attempt instead.
+func waitForSuccessfulSubmissionAs(t *testing.T, addr string, caPool *x509.CertPool,
+	username, password, subject, envelopeFrom, headerFrom string, timeout time.Duration) error {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if lastErr = submit(t, addr, caPool, username, password, subject); lastErr == nil {
+		lastErr = submitAs(t, addr, caPool, username, password, subject, envelopeFrom, headerFrom)
+		if lastErr == nil {
 			return nil
 		}
 		time.Sleep(2 * time.Second)
@@ -281,43 +305,6 @@ func waitForNewPassword(t *testing.T, c client.Client, namespace, name, previous
 		time.Sleep(time.Second)
 	}
 	t.Fatalf("the password was not rotated within %s", timeout)
-	return ""
-}
-
-// waitForMailpitMessage returns the raw message with the given subject.
-func waitForMailpitMessage(t *testing.T, apiURL, subject string, timeout time.Duration) string {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		var payload struct {
-			Messages []struct {
-				ID      string
-				Subject string
-			}
-		}
-		if resp, err := http.Get(apiURL + "/api/v1/messages"); err == nil {
-			err := json.NewDecoder(resp.Body).Decode(&payload)
-			resp.Body.Close()
-			if err == nil {
-				for _, msg := range payload.Messages {
-					if msg.Subject != subject {
-						continue
-					}
-					raw, err := http.Get(apiURL + "/api/v1/message/" + msg.ID + "/raw")
-					if err != nil {
-						break
-					}
-					body, err := io.ReadAll(raw.Body)
-					raw.Body.Close()
-					if err == nil {
-						return string(body)
-					}
-				}
-			}
-		}
-		time.Sleep(time.Second)
-	}
-	t.Fatalf("no message with subject %q reached the upstream within %s", subject, timeout)
 	return ""
 }
 

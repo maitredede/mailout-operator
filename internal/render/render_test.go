@@ -184,24 +184,39 @@ func TestCertificateSecretNamesFromIssuer(t *testing.T) {
 	}
 }
 
-func TestDKIMSecretNamesIncludesAccountOverrides(t *testing.T) {
+// Only the gateway's own keys are mounted. Accounts used to be able to name a
+// Secret here, which let a tenant mount any Secret of the operator's namespace
+// into the gateway pod — and sign with it for somebody else's domain.
+func TestDKIMSecretNamesComesOnlyFromTheGateway(t *testing.T) {
 	names := DKIMSecretNames(testGateway(), []Account{
-		{Username: "a", DKIM: []v1alpha1.DKIMKeySpec{
-			{Domain: "other.com", Selector: "s", PrivateKeySecretRef: v1alpha1.SecretKeySelector{Name: "dkim-other"}},
-		}},
-		{Username: "b", DKIM: []v1alpha1.DKIMKeySpec{
-			// A repeat must appear only once.
-			{Domain: "other.com", Selector: "s", PrivateKeySecretRef: v1alpha1.SecretKeySelector{Name: "dkim-other"}},
+		{Username: "a", AllowedSenders: []string{"*@other.com"}},
+	})
+	if len(names) != 1 || names[0] != "dkim-example" {
+		t.Fatalf("got %v, want [dkim-example]", names)
+	}
+}
+
+// An account's declared senders must reach the dataplane, since they gate both
+// the envelope and the signature.
+func TestGatewayConfigCarriesTheSenderPolicy(t *testing.T) {
+	cfg, err := GatewayConfig(Input{
+		Gateway: testGateway(),
+		Accounts: []Account{{
+			Username:            "app",
+			PasswordHash:        "$2a$12$x",
+			AllowedSenders:      []string{"app@example.com", "*@mail.example.com"},
+			SkipHeaderFromCheck: true,
 		}},
 	})
-	want := []string{"dkim-example", "dkim-other"}
-	if len(names) != len(want) {
-		t.Fatalf("got %v, want %v", names, want)
+	if err != nil {
+		t.Fatalf("GatewayConfig: %v", err)
 	}
-	for i := range want {
-		if names[i] != want[i] {
-			t.Fatalf("got %v, want %v", names, want)
-		}
+	account := cfg.Accounts[0]
+	if len(account.AllowedSenders) != 2 || account.AllowedSenders[0] != "app@example.com" {
+		t.Fatalf("allowedSenders = %v", account.AllowedSenders)
+	}
+	if !account.SkipHeaderFromCheck {
+		t.Fatal("skipHeaderFromCheck was not carried through")
 	}
 }
 
@@ -227,13 +242,7 @@ func TestListenerStatuses(t *testing.T) {
 
 func TestDeploymentMountsConfigCertificatesAndKeys(t *testing.T) {
 	gw := testGateway()
-	accounts := []Account{{
-		Username: "app",
-		DKIM: []v1alpha1.DKIMKeySpec{{
-			Domain: "other.com", Selector: "s",
-			PrivateKeySecretRef: v1alpha1.SecretKeySelector{Name: "dkim-other"},
-		}},
-	}}
+	accounts := []Account{{Username: "app", AllowedSenders: []string{"*@example.com"}}}
 	cfg, err := GatewayConfig(Input{Gateway: gw, Accounts: accounts})
 	if err != nil {
 		t.Fatalf("GatewayConfig: %v", err)
@@ -255,7 +264,6 @@ func TestDeploymentMountsConfigCertificatesAndKeys(t *testing.T) {
 		"/etc/mailout",
 		"/etc/mailout/tls/mail-tls",
 		"/etc/mailout/dkim/dkim-example",
-		"/etc/mailout/dkim/dkim-other",
 	} {
 		if !mounted[want] {
 			t.Errorf("%s is not mounted; got %v", want, mounted)
@@ -489,5 +497,32 @@ func TestAccountSecretIsLabelledWithItsGateway(t *testing.T) {
 	// the watch silently blind.
 	if got := secret.Labels["app.kubernetes.io/managed-by"]; got != "mailout-operator" {
 		t.Errorf("managed-by = %q", got)
+	}
+}
+
+// A sending service that signs for us must be left to it: two signatures would
+// mean ours breaking as soon as the service rewrites the body, and a dkim=fail
+// in the DMARC reports for nothing.
+func TestUpstreamHandlingDKIMDisablesSigning(t *testing.T) {
+	gw := testGateway()
+	gw.Spec.Upstream.HandlesDKIM = true
+
+	cfg, err := GatewayConfig(Input{Gateway: gw})
+	if err != nil {
+		t.Fatalf("GatewayConfig: %v", err)
+	}
+	if len(cfg.DKIM) != 0 {
+		t.Fatalf("keys were rendered despite handlesDKIM: %+v", cfg.DKIM)
+	}
+	// The keys stay declared in the spec, so switching back is one boolean.
+	if len(gw.Spec.DKIM) != 1 {
+		t.Fatal("the spec should keep its keys")
+	}
+	// And the Secret is no longer mounted, since nothing reads it.
+	deploy := Deployment(gw, cfg, nil, "image:test")
+	for _, volume := range deploy.Spec.Template.Spec.Volumes {
+		if volume.Secret != nil && volume.Secret.SecretName == "dkim-example" {
+			t.Fatal("the DKIM Secret is still mounted although nothing signs")
+		}
 	}
 }

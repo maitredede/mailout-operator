@@ -47,9 +47,28 @@ type MailoutAccountSpec struct {
 	// +optional
 	Rotation string `json:"rotation,omitempty"`
 
-	// DKIM overrides the gateway's signing keys for this account.
+	// AllowedSenders lists the addresses this account may send from, either as
+	// an exact address (app@example.com) or as a whole domain (*@example.com).
+	//
+	// Empty places no restriction on the envelope — and disables DKIM signing
+	// for this account entirely. Declaring a sender is what earns a signature:
+	// a signature vouches for a domain, and an account must not be able to
+	// vouch for a domain it may not send from. This is also what stops one
+	// tenant from having another tenant's domain signed.
 	// +optional
-	DKIM []DKIMKeySpec `json:"dkim,omitempty"`
+	AllowedSenders []string `json:"allowedSenders,omitempty"`
+
+	// EnforceHeaderFrom also applies allowedSenders to the message's From
+	// header, not just to the envelope. On by default: an account that passes
+	// the envelope check but forges its From header still shows a forged sender
+	// to the recipient, whether or not DMARC alignment catches it.
+	//
+	// Turn it off for an application that legitimately sends on behalf of
+	// arbitrary addresses — a ticketing system relaying a customer's reply, for
+	// instance.
+	// +kubebuilder:default=true
+	// +optional
+	EnforceHeaderFrom *bool `json:"enforceHeaderFrom,omitempty"`
 
 	// +optional
 	Milters AccountMiltersSpec `json:"milters,omitempty"`

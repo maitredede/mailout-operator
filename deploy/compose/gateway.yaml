@@ -31,6 +31,11 @@ accounts:
   # password: demo-password (see deploy/compose/README.md)
   - username: app1
     passwordHash: "$2a$12$C7yTXw50xW.ESgrG6t3Ip.Nm0epgrTWQfX88LiB7PZc/SqmfLmLki"
+    # Declaring the sender is what earns a DKIM signature: a signature vouches
+    # for a domain, so an account only gets one for a domain it may send from.
+    # Leave this out and mail still relays — unsigned.
+    allowedSenders:
+      - "*@example.test"
 
 dkim:
   # Only mail whose sender domain matches gets signed; anything else goes out

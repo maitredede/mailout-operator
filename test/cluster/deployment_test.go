@@ -121,8 +121,9 @@ func TestDeployedOperatorWithCertManager(t *testing.T) {
 	account := &v1alpha1.MailoutAccount{
 		ObjectMeta: metav1.ObjectMeta{Name: "secure-app", Namespace: tenantNamespace},
 		Spec: v1alpha1.MailoutAccountSpec{
-			GatewayRef: v1alpha1.GatewayReference{Name: "secure"},
-			SecretRef:  v1alpha1.LocalObjectReference{Name: "secure-app-smtp"},
+			GatewayRef:     v1alpha1.GatewayReference{Name: "secure"},
+			SecretRef:      v1alpha1.LocalObjectReference{Name: "secure-app-smtp"},
+			AllowedSenders: []string{"*@example.test"},
 		},
 	}
 	if err := c.Create(t.Context(), account); err != nil {

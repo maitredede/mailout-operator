@@ -13,8 +13,11 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,8 +40,10 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -309,6 +314,11 @@ func startReconcilers(t *testing.T, restConfig *rest.Config, scheme *runtime.Sch
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:  scheme,
 		Metrics: metricsserver.Options{BindAddress: "0"},
+		// Several tests in this package each start their own manager in the
+		// same process, and controller-runtime refuses two controllers with the
+		// same name because their metrics would collide. That is a real
+		// safeguard in a real operator, and pure noise here.
+		Controller: config.Controller{SkipNameValidation: ptr.To(true)},
 	})
 	if err != nil {
 		t.Fatalf("create manager: %v", err)
@@ -446,6 +456,77 @@ func (cl *cluster) waitForPublishedHash(t *testing.T, gatewayName, accountNamesp
 	}
 	t.Fatalf("the operator never published the account's current hash within %s\n"+
 		"wanted hash: %s\npublished configuration:\n%s", timeout, wanted, published)
+}
+
+// newNamespace creates a uniquely named namespace, so that tenants in a test
+// cannot collide with each other or with another test's leftovers.
+func (cl *cluster) newNamespace(t *testing.T, prefix string) string {
+	t.Helper()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: prefix + "-"}}
+	if err := cl.Client.Create(t.Context(), ns); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	return ns.Name
+}
+
+// mailpitMessage is one message as the upstream reports it.
+type mailpitMessage struct {
+	ID      string
+	Subject string
+}
+
+// errUnexpectedLookup marks a DNS lookup a test did not expect, so a stray
+// query cannot pass for a successful verification.
+var errUnexpectedLookup = errors.New("unexpected DKIM record lookup")
+
+// mailpitMessages lists what the upstream received.
+func (cl *cluster) mailpitMessages(t *testing.T) []mailpitMessage {
+	t.Helper()
+	resp, err := http.Get(cl.MailpitAPIURL + "/api/v1/messages")
+	if err != nil {
+		t.Fatalf("list upstream messages: %v", err)
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Messages []mailpitMessage
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode upstream messages: %v", err)
+	}
+	return payload.Messages
+}
+
+// mailpitRaw returns a received message as it arrived on the wire, which is what
+// the DKIM assertions need.
+func (cl *cluster) mailpitRaw(t *testing.T, id string) string {
+	t.Helper()
+	resp, err := http.Get(cl.MailpitAPIURL + "/api/v1/message/" + id + "/raw")
+	if err != nil {
+		t.Fatalf("fetch raw message: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read raw message: %v", err)
+	}
+	return string(body)
+}
+
+// waitForMailpitMessage returns the raw message with the given subject.
+func waitForMailpitMessage(t *testing.T, apiURL, subject string, timeout time.Duration) string {
+	t.Helper()
+	cl := &cluster{MailpitAPIURL: apiURL}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, message := range cl.mailpitMessages(t) {
+			if message.Subject == subject {
+				return cl.mailpitRaw(t, message.ID)
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("no message with subject %q reached the upstream within %s", subject, timeout)
+	return ""
 }
 
 // nodePortService exposes the gateway's pods on a fixed node port. The operator

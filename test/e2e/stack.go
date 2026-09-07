@@ -38,6 +38,8 @@ const (
 // Account credentials the tests authenticate with.
 const (
 	testUsername = "app1"
+	// openUsername declares no sender policy: free to send, never signed.
+	openUsername = "open1"
 	testPassword = "e2e-password"
 	testCertName = "mailout.e2e.test"
 	testDomain   = "example.test"
@@ -117,7 +119,20 @@ func newStack(t *testing.T, network *testcontainers.DockerNetwork, opts ...stack
 			KeyPEM:  string(serverCert.KeyPEM),
 		}}},
 		Upstream: gateway.Upstream{Host: mp.SMTPHost, Port: mp.SMTPPort, TLS: gateway.TLSModeNone},
-		Accounts: []gateway.Account{{Username: testUsername, PasswordHash: hash}},
+		Accounts: []gateway.Account{
+			{
+				Username:     testUsername,
+				PasswordHash: hash,
+				// The account must declare its domain to have it signed.
+				AllowedSenders: []string{"*@" + testDomain},
+			},
+			{
+				// No policy: sends from anywhere, signed nowhere. This is what
+				// an account looks like before it is tightened up.
+				Username:     openUsername,
+				PasswordHash: hash,
+			},
+		},
 		DKIM: []gateway.DKIMKey{{
 			Domain:        testDomain,
 			Selector:      testSelector,
