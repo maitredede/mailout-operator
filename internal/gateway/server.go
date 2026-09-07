@@ -17,6 +17,7 @@ import (
 
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
+	"github.com/redis/go-redis/v9"
 )
 
 // snapshot is everything the dataplane derives from one Config. It is built
@@ -33,6 +34,9 @@ type snapshot struct {
 	relay    *relayer
 	milters  *milterChain
 	dkim     *dkimSigner
+	// limiter counts against the shared quota store. Nil when the gateway
+	// declares no rateLimit.
+	limiter *limiter
 	// policies holds the per-account filter chain and signer. An account with
 	// no override shares the gateway's own.
 	policies map[string]accountPolicy
@@ -47,7 +51,7 @@ type accountPolicy struct {
 	skipHeaderFromCheck bool
 }
 
-func newSnapshot(cfg *Config, log *slog.Logger, metrics *Metrics) (*snapshot, error) {
+func newSnapshot(cfg *Config, log *slog.Logger, metrics *Metrics, prev *snapshot) (*snapshot, error) {
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -68,6 +72,16 @@ func newSnapshot(cfg *Config, log *slog.Logger, metrics *Metrics) (*snapshot, er
 	if err != nil {
 		return nil, err
 	}
+	// The quota store's connection pool outlives a reload that did not touch it:
+	// reconnecting on every account change would drop the pool for no reason,
+	// and a gateway that fails closed cannot afford a gap.
+	lim := reusableLimiter(prev, cfg)
+	if lim == nil {
+		if lim, err = newLimiter(cfg, log, metrics); err != nil {
+			return nil, err
+		}
+	}
+
 	served, rejected := cfg.PartitionAccounts()
 	for _, account := range rejected {
 		log.Error("account not served", "account", account.Username, "reason", account.Reason)
@@ -81,6 +95,7 @@ func newSnapshot(cfg *Config, log *slog.Logger, metrics *Metrics) (*snapshot, er
 		relay:    relay,
 		milters:  milters,
 		dkim:     signer,
+		limiter:  lim,
 		policies: make(map[string]accountPolicy, len(served)),
 	}
 	for _, acct := range served {
@@ -95,6 +110,23 @@ func newSnapshot(cfg *Config, log *slog.Logger, metrics *Metrics) (*snapshot, er
 		snap.policies[acct.Username] = policy
 	}
 	return snap, nil
+}
+
+// reusableLimiter returns the previous snapshot's limiter when the new
+// configuration describes the very same store, and nil when a new one must be
+// built.
+func reusableLimiter(prev *snapshot, cfg *Config) *limiter {
+	if prev == nil || prev.limiter == nil || cfg.RateLimit == nil {
+		return nil
+	}
+	if !sameStore(prev.limiter.limits.Store, cfg.RateLimit.Store) {
+		return nil
+	}
+	// The connection is the same; the limits themselves may well have changed.
+	reused := *prev.limiter
+	reused.limits = *cfg.RateLimit
+	reused.gateway = cfg.Hostname
+	return &reused
 }
 
 // policyFor returns what applies to an account. An account absent from the
@@ -161,12 +193,20 @@ func NewServer(cfg *Config, log *slog.Logger, opts ...ServerOption) (*Server, er
 // the previous one stays in service: a bad update must never take the relay
 // down.
 func (s *Server) Reload(cfg *Config) error {
-	snap, err := newSnapshot(cfg, s.log, s.metrics)
+	previous := s.current.Load()
+	snap, err := newSnapshot(cfg, s.log, s.metrics, previous)
 	if err != nil {
 		s.metrics.configReloaded("failure", 0, 0)
 		return err
 	}
 	s.current.Store(snap)
+	// A store the new configuration no longer points at is closed. Sessions
+	// still holding the old snapshot then fail closed, which is the same answer
+	// they would get from a store that had genuinely gone away — and changing
+	// the store under a running relay is not an everyday operation.
+	if previous != nil && previous.limiter != nil && previous.limiter.client != snap.limiterClient() {
+		previous.limiter.close()
+	}
 	// After the swap, so the gauges never describe a configuration that is not
 	// the one being served.
 	s.metrics.configReloaded("success", len(snap.accounts.byUsername), len(snap.rejected))
@@ -178,6 +218,15 @@ func (s *Server) Reload(cfg *Config) error {
 		"dkimKeys", len(snap.config.DKIM),
 		"upstream", snap.config.Upstream.Address())
 	return nil
+}
+
+// limiterClient is the connection the snapshot uses, or nil when it counts
+// nothing.
+func (s *snapshot) limiterClient() redis.UniversalClient {
+	if s == nil || s.limiter == nil {
+		return nil
+	}
+	return s.limiter.client
 }
 
 func (s *Server) snapshot() *snapshot { return s.current.Load() }
@@ -246,6 +295,7 @@ func (s *Server) Close() {
 	for _, srv := range servers {
 		_ = srv.Close()
 	}
+	s.snapshot().limiter.close()
 }
 
 // newSMTPServer builds the go-smtp server for one listener. TLS is wired to the
@@ -383,6 +433,14 @@ func (s *session) Data(r io.Reader) error {
 			Message:      "No valid recipients",
 		}
 	}
+	// Counted before the message is even read: refusing an account that is over
+	// quota must not first cost the relay the bandwidth and memory of the body
+	// it is about to throw away.
+	if err := s.snap.limiter.check(context.Background(), s.account.Username, len(s.to)); err != nil {
+		s.server.metrics.messageHandled(s.account.Username, ResultDeferred)
+		return err
+	}
+
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return err

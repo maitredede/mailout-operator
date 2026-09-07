@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -231,6 +232,72 @@ func TestGatewayResolvesUpstreamCredentials(t *testing.T) {
 	cfg := renderedConfig(t, c, "upstreamauth")
 	if cfg.Upstream.Username != "relay" || cfg.Upstream.Password != "hunter2" {
 		t.Fatalf("upstream credentials = %+v", cfg.Upstream)
+	}
+}
+
+// The quota store's credentials follow the same path as the upstream's: read
+// from a Secret the user owns and folded into the published configuration, so
+// the gateway pod keeps no API permission of its own.
+func TestGatewayResolvesRateLimitStoreCredentials(t *testing.T) {
+	c := newTestClient(t)
+	ensureOperatorNamespace(t, c)
+	auth := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "valkey-creds", Namespace: operatorNamespace},
+		Type:       corev1.SecretTypeBasicAuth,
+		StringData: map[string]string{"username": "mailout", "password": "quota-secret"},
+	}
+	if err := c.Create(t.Context(), auth); err != nil {
+		t.Fatalf("create store secret: %v", err)
+	}
+	gw := newGateway(t, c, "quota", func(g *v1alpha1.MailoutGateway) {
+		g.Spec.RateLimit = &v1alpha1.RateLimitSpec{
+			Store: v1alpha1.RateLimitStoreSpec{
+				Addresses:     []string{"valkey.mailout-system.svc:6379"},
+				AuthSecretRef: &v1alpha1.LocalObjectReference{Name: "valkey-creds"},
+			},
+			MessagesPerMinute: ptr.To(int32(60)),
+		}
+	})
+
+	reconcileGateway(t, newGatewayReconciler(c), gw)
+
+	cfg := renderedConfig(t, c, "quota")
+	if cfg.RateLimit == nil {
+		t.Fatal("the quota was not published at all")
+	}
+	if cfg.RateLimit.MessagesPerMinute != 60 {
+		t.Errorf("messagesPerMinute = %d, want 60", cfg.RateLimit.MessagesPerMinute)
+	}
+	if cfg.RateLimit.Store.Username != "mailout" || cfg.RateLimit.Store.Password != "quota-secret" {
+		t.Errorf("store credentials = %+v", cfg.RateLimit.Store)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("published configuration is invalid: %v", err)
+	}
+}
+
+// A missing store Secret is reported rather than published empty. The relay
+// fails closed on a store it cannot reach, so an unusable credential would stop
+// mail with a diagnosis pointing at the wrong place.
+func TestGatewayReportsMissingRateLimitSecret(t *testing.T) {
+	c := newTestClient(t)
+	ensureOperatorNamespace(t, c)
+	gw := newGateway(t, c, "quotamissing", func(g *v1alpha1.MailoutGateway) {
+		g.Spec.RateLimit = &v1alpha1.RateLimitSpec{
+			Store: v1alpha1.RateLimitStoreSpec{
+				Addresses:     []string{"valkey:6379"},
+				AuthSecretRef: &v1alpha1.LocalObjectReference{Name: "absent"},
+			},
+			MessagesPerMinute: ptr.To(int32(60)),
+		}
+	})
+
+	reconcileGateway(t, newGatewayReconciler(c), gw)
+
+	condition := meta.FindStatusCondition(refreshGateway(t, c, gw).Status.Conditions, v1alpha1.ConditionAccepted)
+	if condition == nil || condition.Status != metav1.ConditionFalse ||
+		condition.Reason != v1alpha1.ReasonSecretMissing {
+		t.Fatalf("accepted condition = %+v", condition)
 	}
 }
 

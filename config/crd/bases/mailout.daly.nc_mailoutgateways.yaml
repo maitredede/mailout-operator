@@ -1284,6 +1284,111 @@ spec:
                   - name
                   type: object
                 type: array
+              rateLimit:
+                description: |-
+                  RateLimit caps what each account of this gateway may send, counted in a
+                  store shared by every replica.
+                properties:
+                  messagesPerMinute:
+                    description: |-
+                      MessagesPerMinute caps how many messages an account may submit. Zero
+                      leaves messages uncounted.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  recipientsPerMinute:
+                    description: |-
+                      RecipientsPerMinute caps the recipients across those messages. Counted
+                      separately because a thousand messages to one recipient and one message to
+                      a thousand recipients are the same amount of mail, and a message count
+                      only catches the first.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  store:
+                    description: |-
+                      Store is where the counters live. Referenced, never deployed: the store
+                      is infrastructure with its own lifecycle, and mailout does not run one for
+                      you.
+                    properties:
+                      addresses:
+                        description: |-
+                          Addresses is one address for a standalone server, the Sentinel addresses
+                          when masterName is set, or the seed nodes of a cluster.
+
+                          Several addresses without a masterName means cluster mode. A plain
+                          primary-and-replicas trio listed here without one would be taken for a
+                          cluster; the gateway logs which mode it deduced at startup.
+                        items:
+                          type: string
+                        minItems: 1
+                        type: array
+                      authSecretRef:
+                        description: |-
+                          AuthSecretRef holds the store credentials, in the username and password
+                          keys. A store with only a password needs the password key alone.
+                        properties:
+                          name:
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      db:
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      masterName:
+                        description: |-
+                          MasterName is the Sentinel master name. Set it for a Valkey deployed as
+                          one primary and two replicas behind Sentinel.
+                        type: string
+                      sentinelAuthSecretRef:
+                        description: |-
+                          SentinelAuthSecretRef holds the credentials of the Sentinels themselves,
+                          which are usually distinct from the store's own.
+                        properties:
+                          name:
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      timeout:
+                        description: |-
+                          Timeout bounds every call to the store. It sits on the path of every
+                          message, so keep it short: failing closed is meant to refuse quickly, not
+                          to hang. Defaults to 2s.
+                        type: string
+                      tls:
+                        description: TLS, when present, connects over TLS.
+                        properties:
+                          caSecretRef:
+                            description: CASecretRef restricts verification to this
+                              CA, read from the ca.crt key.
+                            properties:
+                              key:
+                                description: Key defaults to the kind-specific key
+                                  documented on each field.
+                                type: string
+                              name:
+                                minLength: 1
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          insecureSkipVerify:
+                            description: |-
+                              InsecureSkipVerify disables certificate verification. For a self-signed
+                              test store only.
+                            type: boolean
+                        type: object
+                    required:
+                    - addresses
+                    type: object
+                required:
+                - store
+                type: object
               tls:
                 description: |-
                   GatewayTLSSpec is the certificates served to clients. Several certificates

@@ -42,8 +42,11 @@ type Config struct {
 	// Milters are applied in order, each seeing the previous one's changes.
 	Milters []Milter `json:"milters,omitempty"`
 	// DKIM keys, one per signing domain. Signing happens after the milters.
-	DKIM   []DKIMKey `json:"dkim,omitempty"`
-	Limits Limits    `json:"limits"`
+	DKIM []DKIMKey `json:"dkim,omitempty"`
+	// RateLimit caps what each account may send, counted in a store shared by
+	// every replica of the gateway. Absent means no quota at all.
+	RateLimit *RateLimit `json:"rateLimit,omitempty"`
+	Limits    Limits     `json:"limits"`
 }
 
 // Listener is one socket the gateway accepts submissions on.
@@ -295,6 +298,11 @@ func (c *Config) Validate() error {
 	default:
 		errs = append(errs, fmt.Sprintf("upstream.tls must be one of %q, %q, %q; got %q",
 			TLSModeSTARTTLS, TLSModeImplicit, TLSModeNone, c.Upstream.TLS))
+	}
+	if c.RateLimit != nil && len(c.RateLimit.Store.Addresses) == 0 {
+		// The relay fails closed on a store it cannot reach, so publishing a
+		// quota with nowhere to count would stop mail rather than cap it.
+		errs = append(errs, "rateLimit.store.addresses is required")
 	}
 	for i, m := range c.Milters {
 		if _, _, err := m.ParseAddress(); err != nil {

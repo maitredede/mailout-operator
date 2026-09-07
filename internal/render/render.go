@@ -69,6 +69,22 @@ type Input struct {
 	UpstreamPassword string
 	// UpstreamCAPEM comes from the upstream CA Secret.
 	UpstreamCAPEM string
+	// RateLimitStore holds what the operator read from the quota store's
+	// Secrets. Credentials are resolved by the operator and embedded in the
+	// rendered configuration, like the upstream's: the gateway pod holds no API
+	// permission of its own.
+	RateLimitStore RateLimitCredentials
+}
+
+// RateLimitCredentials is what the operator resolved for the quota store.
+type RateLimitCredentials struct {
+	Username string
+	Password string
+	// SentinelUsername and SentinelPassword authenticate to the Sentinels,
+	// which usually have credentials of their own.
+	SentinelUsername string
+	SentinelPassword string
+	CAPEM            string
 }
 
 // GatewayConfig renders the dataplane configuration. The result is
@@ -93,6 +109,7 @@ func GatewayConfig(in Input) (*gateway.Config, error) {
 		Upstream:  renderUpstream(gw.Spec.Upstream, in),
 		Milters:   renderMilters(gw.Spec.Milters),
 	}
+	cfg.RateLimit = renderRateLimit(gw.Spec.RateLimit, in.RateLimitStore)
 	// An upstream that signs for us must be left to it: two signatures would
 	// mean ours breaking as soon as the service rewrites the body.
 	if !gw.Spec.Upstream.HandlesDKIM {
@@ -112,6 +129,40 @@ func GatewayConfig(in Input) (*gateway.Config, error) {
 		})
 	}
 	return cfg, nil
+}
+
+// renderRateLimit turns the quota spec into the dataplane's own, with the
+// credentials the operator resolved folded in.
+func renderRateLimit(spec *v1alpha1.RateLimitSpec, creds RateLimitCredentials) *gateway.RateLimit {
+	if spec == nil {
+		return nil
+	}
+	out := &gateway.RateLimit{
+		Store: gateway.RateLimitStore{
+			Addresses:        append([]string(nil), spec.Store.Addresses...),
+			MasterName:       spec.Store.MasterName,
+			DB:               int(spec.Store.DB),
+			Username:         creds.Username,
+			Password:         creds.Password,
+			SentinelUsername: creds.SentinelUsername,
+			SentinelPassword: creds.SentinelPassword,
+		},
+	}
+	if spec.Store.TLS != nil {
+		out.Store.TLS = true
+		out.Store.InsecureSkipVerify = spec.Store.TLS.InsecureSkipVerify
+		out.Store.RootCAPEM = creds.CAPEM
+	}
+	if spec.Store.Timeout != nil {
+		out.Store.Timeout = gateway.Duration(spec.Store.Timeout.Duration)
+	}
+	if spec.MessagesPerMinute != nil {
+		out.MessagesPerMinute = int(*spec.MessagesPerMinute)
+	}
+	if spec.RecipientsPerMinute != nil {
+		out.RecipientsPerMinute = int(*spec.RecipientsPerMinute)
+	}
+	return out
 }
 
 // renderListeners defaults to a lone submission listener, which is what a

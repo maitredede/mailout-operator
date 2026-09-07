@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 )
 
@@ -606,5 +607,64 @@ func TestMetricsPortIsNamedConsistently(t *testing.T) {
 	target := MetricsService(gw).Spec.Ports[0].TargetPort
 	if target.StrVal != MetricsPortName {
 		t.Errorf("Service targetPort = %v, want the named port %s", target, MetricsPortName)
+	}
+}
+
+// The quota reaches the dataplane with its credentials already resolved: the
+// gateway pod holds no API permission, so anything it needs must be in the
+// file the operator writes.
+func TestRenderRateLimit(t *testing.T) {
+	gw := testGateway()
+	gw.Spec.RateLimit = &v1alpha1.RateLimitSpec{
+		Store: v1alpha1.RateLimitStoreSpec{
+			Addresses:  []string{"s1:26379", "s2:26379"},
+			MasterName: "mailout",
+			DB:         3,
+			TLS:        &v1alpha1.RateLimitStoreTLSSpec{},
+			Timeout:    &metav1.Duration{Duration: 3 * time.Second},
+		},
+		MessagesPerMinute: ptr.To(int32(60)),
+	}
+
+	cfg, err := GatewayConfig(Input{
+		Gateway: gw,
+		RateLimitStore: RateLimitCredentials{
+			Username: "mailout", Password: "s3cret",
+			SentinelUsername: "sentinel", SentinelPassword: "other",
+			CAPEM: "-----BEGIN CERTIFICATE-----\n",
+		},
+	})
+	if err != nil {
+		t.Fatalf("GatewayConfig: %v", err)
+	}
+	store := cfg.RateLimit.Store
+	if !store.TLS {
+		t.Error("declaring spec.rateLimit.store.tls did not turn TLS on")
+	}
+	if store.MasterName != "mailout" || store.DB != 3 {
+		t.Errorf("store = %+v", store)
+	}
+	// The Sentinels have credentials of their own; mixing them up would
+	// authenticate to the wrong thing and fail only at failover time.
+	if store.Username != "mailout" || store.SentinelUsername != "sentinel" ||
+		store.Password != "s3cret" || store.SentinelPassword != "other" {
+		t.Errorf("credentials = %+v", store)
+	}
+	if store.RootCAPEM == "" {
+		t.Error("the CA was not carried through")
+	}
+	if cfg.RateLimit.MessagesPerMinute != 60 || cfg.RateLimit.RecipientsPerMinute != 0 {
+		t.Errorf("limits = %+v", cfg.RateLimit)
+	}
+
+	// No quota declared means no quota at all — not an empty one, which the
+	// dataplane would take for a store it must reach.
+	gw.Spec.RateLimit = nil
+	plain, err := GatewayConfig(Input{Gateway: gw})
+	if err != nil {
+		t.Fatalf("GatewayConfig: %v", err)
+	}
+	if plain.RateLimit != nil {
+		t.Errorf("rateLimit = %+v, want nil", plain.RateLimit)
 	}
 }

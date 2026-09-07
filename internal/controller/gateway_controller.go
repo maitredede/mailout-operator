@@ -86,7 +86,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	input := render.Input{Gateway: &gw, Accounts: accounts}
-	if err := r.resolveUpstreamSecrets(ctx, &gw, &input); err != nil {
+	if err := r.resolveSecrets(ctx, &gw, &input); err != nil {
 		return ctrl.Result{}, r.markFailed(ctx, &gw, v1alpha1.ReasonSecretMissing, err.Error())
 	}
 
@@ -179,10 +179,10 @@ func (r *GatewayReconciler) collectAccounts(ctx context.Context, gw *v1alpha1.Ma
 	return accounts, nil
 }
 
-// resolveUpstreamSecrets reads the credentials and CA the gateway points at.
-// These Secrets belong to the user, so they are read uncached — the operator
-// caches only what it owns.
-func (r *GatewayReconciler) resolveUpstreamSecrets(ctx context.Context, gw *v1alpha1.MailoutGateway, input *render.Input) error {
+// resolveSecrets reads the credentials and CAs the gateway points at, for both
+// the upstream and the quota store. These Secrets belong to the user, so they
+// are read uncached — the operator caches only what it owns.
+func (r *GatewayReconciler) resolveSecrets(ctx context.Context, gw *v1alpha1.MailoutGateway, input *render.Input) error {
 	if ref := gw.Spec.Upstream.AuthSecretRef; ref != nil {
 		var secret corev1.Secret
 		key := client.ObjectKey{Namespace: gw.Namespace, Name: ref.Name}
@@ -208,6 +208,63 @@ func (r *GatewayReconciler) resolveUpstreamSecrets(ctx context.Context, gw *v1al
 		input.UpstreamCAPEM = string(secret.Data[caKey])
 		if input.UpstreamCAPEM == "" {
 			return fmt.Errorf("upstream CA Secret %s has no %s key", key, caKey)
+		}
+	}
+	return r.resolveRateLimitSecrets(ctx, gw, input)
+}
+
+// resolveRateLimitSecrets reads what the quota store needs. A missing Secret is
+// an error rather than an empty credential: the relay fails closed on a store it
+// cannot reach, so publishing a configuration that silently cannot authenticate
+// would stop mail with a diagnosis pointing at the wrong place.
+func (r *GatewayReconciler) resolveRateLimitSecrets(ctx context.Context, gw *v1alpha1.MailoutGateway, input *render.Input) error {
+	if gw.Spec.RateLimit == nil {
+		return nil
+	}
+	store := gw.Spec.RateLimit.Store
+
+	read := func(ref *v1alpha1.LocalObjectReference, what string) (username, password string, err error) {
+		if ref == nil {
+			return "", "", nil
+		}
+		var secret corev1.Secret
+		key := client.ObjectKey{Namespace: gw.Namespace, Name: ref.Name}
+		if err := r.APIReader.Get(ctx, key, &secret); err != nil {
+			return "", "", fmt.Errorf("%s Secret %s: %w", what, key, err)
+		}
+		password = string(secret.Data[corev1.BasicAuthPasswordKey])
+		if password == "" {
+			return "", "", fmt.Errorf("%s Secret %s has no %s key", what, key, corev1.BasicAuthPasswordKey)
+		}
+		// A store with requirepass and no ACL user has a password and nothing
+		// else, which is the common case.
+		return string(secret.Data[corev1.BasicAuthUsernameKey]), password, nil
+	}
+
+	var err error
+	creds := &input.RateLimitStore
+	if creds.Username, creds.Password, err = read(store.AuthSecretRef, "rate limit store auth"); err != nil {
+		return err
+	}
+	if creds.SentinelUsername, creds.SentinelPassword, err =
+		read(store.SentinelAuthSecretRef, "rate limit store sentinel auth"); err != nil {
+		return err
+	}
+
+	if store.TLS != nil && store.TLS.CASecretRef != nil {
+		ref := store.TLS.CASecretRef
+		var secret corev1.Secret
+		key := client.ObjectKey{Namespace: gw.Namespace, Name: ref.Name}
+		if err := r.APIReader.Get(ctx, key, &secret); err != nil {
+			return fmt.Errorf("rate limit store CA Secret %s: %w", key, err)
+		}
+		caKey := ref.Key
+		if caKey == "" {
+			caKey = "ca.crt"
+		}
+		creds.CAPEM = string(secret.Data[caKey])
+		if creds.CAPEM == "" {
+			return fmt.Errorf("rate limit store CA Secret %s has no %s key", key, caKey)
 		}
 	}
 	return nil

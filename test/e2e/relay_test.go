@@ -6,6 +6,7 @@ package e2e
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/emersion/go-msgauth/dkim"
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
+	"github.com/maitredede/mailout-operator/internal/gateway"
 )
 
 // send authenticates as the signing account and submits one message.
@@ -194,5 +196,83 @@ func TestClamAVScansTheMessage(t *testing.T) {
 	}
 	if !strings.Contains(raw, "DKIM-Signature:") {
 		t.Fatalf("a scanned message must still be signed:\n%s", raw)
+	}
+}
+
+// The quota is enforced against a real Valkey, shared by every replica of the
+// gateway — which is the whole reason it is not an in-process counter.
+func TestQuotaIsEnforcedAgainstARealStore(t *testing.T) {
+	network := newNetwork(t)
+	store := startValkey(t, network)
+	const quota = 3
+	stack := newStack(t, network, func(cfg *gateway.Config) {
+		cfg.RateLimit = &gateway.RateLimit{
+			Store:             gateway.RateLimitStore{Addresses: []string{store.Address}},
+			MessagesPerMinute: quota,
+		}
+	})
+
+	for i := range quota {
+		subject := fmt.Sprintf("quota %d", i)
+		if err := stack.sendAs(t, testUsername, subject, "app@"+testDomain, "under the quota"); err != nil {
+			t.Fatalf("message %d was refused although it is within the quota: %v", i, err)
+		}
+	}
+
+	err := stack.sendAs(t, testUsername, "over quota", "app@"+testDomain, "one too many")
+	if err == nil {
+		t.Fatal("the message over quota was accepted")
+	}
+	// 452 4.2.2, a temporary refusal: the client is expected to hold the
+	// message and try again, not to give up on it.
+	var smtpErr *smtp.SMTPError
+	if !errors.As(err, &smtpErr) || smtpErr.Code != 452 {
+		t.Fatalf("error = %v, want a 452", err)
+	}
+
+	// The other account must be unaffected: the counter is per account, so one
+	// tenant exhausting its quota cannot deny service to another.
+	if err := stack.sendAs(t, openUsername, "other tenant", "someone@elsewhere.test",
+		"a different account"); err != nil {
+		t.Fatalf("the other account was refused: %v", err)
+	}
+}
+
+// Fail-closed, proved by taking the store away rather than by mocking an error:
+// the point is that the client actually reports the failure and the relay
+// actually refuses.
+func TestRelayFailsClosedWhenTheStoreIsGone(t *testing.T) {
+	network := newNetwork(t)
+	store := startValkey(t, network)
+	stack := newStack(t, network, func(cfg *gateway.Config) {
+		cfg.RateLimit = &gateway.RateLimit{
+			Store: gateway.RateLimitStore{
+				Addresses: []string{store.Address},
+				// Short, so a missing store refuses quickly instead of hanging
+				// the submitting application.
+				Timeout: gateway.Duration(2 * time.Second),
+			},
+			MessagesPerMinute: 100,
+		}
+	})
+
+	if err := stack.sendAs(t, testUsername, "before", "app@"+testDomain, "store is up"); err != nil {
+		t.Fatalf("submission refused while the store is up: %v", err)
+	}
+
+	store.stop(t)
+
+	err := stack.sendAs(t, testUsername, "after", "app@"+testDomain, "store is gone")
+	if err == nil {
+		t.Fatal("the message was relayed although the quota store is gone")
+	}
+	var smtpErr *smtp.SMTPError
+	if !errors.As(err, &smtpErr) || smtpErr.Code != 451 {
+		t.Fatalf("error = %v, want a 451", err)
+	}
+	// And nothing leaked through: fail-closed means the message did not reach
+	// the upstream, not merely that the client saw an error.
+	if _, found := stack.Mailpit.find(t, "after"); found {
+		t.Fatal("the message reached the upstream although it was refused")
 	}
 }

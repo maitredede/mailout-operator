@@ -41,6 +41,16 @@ const (
 	decisionUnavailable = "unavailable"
 )
 
+// Rate limiting outcomes, used as the decision label.
+const (
+	rateLimitAllowed = "allowed"
+	rateLimitDenied  = "denied"
+	// rateLimitError is the fail-closed case: the store could not be reached
+	// and the message was refused because of it. It is the series to alert on —
+	// it means the quota store, not the tenant, is stopping mail.
+	rateLimitError = "error"
+)
+
 // DKIM outcomes, used as the result label.
 const (
 	dkimSigned  = "signed"
@@ -69,6 +79,7 @@ type Metrics struct {
 	authFailures     *prometheus.CounterVec
 	milterDecisions  *prometheus.CounterVec
 	dkimSignatures   *prometheus.CounterVec
+	rateLimit        *prometheus.CounterVec
 	upstreamDelivery prometheus.Histogram
 	configReloads    *prometheus.CounterVec
 	accounts         prometheus.Gauge
@@ -104,6 +115,11 @@ func NewMetrics() *Metrics {
 			Help: "DKIM signing outcomes per domain. refused is a message whose account is not allowed " +
 				"to send from that domain; a message with no key for its domain is not counted at all.",
 		}, []string{"domain", "result"}),
+		rateLimit: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mailout_ratelimit_decisions_total",
+			Help: "Quota decisions per account. error means the store was unreachable and the message " +
+				"was refused for it, which is a failure of the relay's own infrastructure, not of the sender.",
+		}, []string{"account", "decision"}),
 		upstreamDelivery: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name: "mailout_upstream_delivery_seconds",
 			Help: "Time spent handing a message to the upstream, successes and failures alike.",
@@ -128,7 +144,7 @@ func NewMetrics() *Metrics {
 	}
 	reg.MustRegister(
 		m.messages, m.messageBytes, m.authFailures, m.milterDecisions, m.dkimSignatures,
-		m.upstreamDelivery, m.configReloads, m.accounts, m.accountsRejected,
+		m.rateLimit, m.upstreamDelivery, m.configReloads, m.accounts, m.accountsRejected,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -179,6 +195,13 @@ func (m *Metrics) dkimResult(domain, result string) {
 		return
 	}
 	m.dkimSignatures.WithLabelValues(domain, result).Inc()
+}
+
+func (m *Metrics) rateLimitDecided(account, decision string) {
+	if m == nil {
+		return
+	}
+	m.rateLimit.WithLabelValues(account, decision).Inc()
 }
 
 func (m *Metrics) upstreamDelivered(d time.Duration) {

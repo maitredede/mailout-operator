@@ -33,6 +33,7 @@ import (
 const (
 	mailpitImage = "axllent/mailpit:v1.31.1"
 	clamavImage  = "clamav/clamav:1.5.4"
+	valkeyImage  = "valkey/valkey:9.1.2-alpine"
 )
 
 // Account credentials the tests authenticate with.
@@ -78,6 +79,54 @@ func withClamAV(t *testing.T, net *testcontainers.DockerNetwork) stackOption {
 			Address: "tcp://" + address,
 			Timeout: gateway.Duration(60 * time.Second),
 		}}
+	}
+}
+
+// valkeyStore is the running quota store, kept so a test can take it away and
+// watch the relay fail closed.
+type valkeyStore struct {
+	Address   string
+	container testcontainers.Container
+}
+
+// stop takes the store down, which is the only honest way to test fail-closed:
+// a mocked error proves the branch, not that the client actually reports one.
+func (v *valkeyStore) stop(t *testing.T) {
+	t.Helper()
+	// Cleanup-style lifetime: the container outlives t.Context().
+	if err := v.container.Stop(context.Background(), nil); err != nil {
+		t.Fatalf("stop valkey: %v", err)
+	}
+}
+
+// startValkey runs a single Valkey. One node is enough to prove the counting
+// and the fail-closed behaviour; the Sentinel and cluster topologies differ
+// only in how the client is constructed, which is covered in unit tests.
+func startValkey(t *testing.T, nw *testcontainers.DockerNetwork) *valkeyStore {
+	t.Helper()
+	ctx := context.Background()
+
+	container, err := testcontainers.Run(ctx, valkeyImage,
+		testcontainers.WithExposedPorts("6379/tcp"),
+		tcnetwork.WithNetwork([]string{"valkey"}, nw),
+		testcontainers.WithWaitStrategy(wait.ForListeningPort("6379/tcp")),
+	)
+	if err != nil {
+		t.Fatalf("start valkey: %v", err)
+	}
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	host, err := container.Host(ctx)
+	if err != nil {
+		t.Fatalf("valkey host: %v", err)
+	}
+	port, err := container.MappedPort(ctx, "6379/tcp")
+	if err != nil {
+		t.Fatalf("valkey port: %v", err)
+	}
+	return &valkeyStore{
+		Address:   net.JoinHostPort(host, port.Port()),
+		container: container,
 	}
 }
 
@@ -350,6 +399,20 @@ func (m *mailpit) waitForMessage(t *testing.T, subject string, timeout time.Dura
 	}
 	t.Fatalf("no message with subject %q arrived within %s", subject, timeout)
 	return message{}
+}
+
+// find reports whether a message with this subject arrived. Unlike
+// waitForMessage it does not wait, because it is used to assert an absence: a
+// message that was refused must never appear, and waiting for it would only
+// slow the test down.
+func (m *mailpit) find(t *testing.T, subject string) (message, bool) {
+	t.Helper()
+	for _, msg := range m.messages(t) {
+		if msg.Subject == subject {
+			return msg, true
+		}
+	}
+	return message{}, false
 }
 
 func (m *mailpit) getJSON(t *testing.T, path string, out any) {

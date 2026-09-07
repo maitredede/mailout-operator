@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/utils/ptr"
 )
 
 // validGateway is the minimum a gateway needs to be admitted.
@@ -124,6 +125,92 @@ func TestGatewayRefusedWithCollidingListenerPorts(t *testing.T) {
 	}))
 	if err == nil {
 		t.Fatal("two listeners on the same port were admitted")
+	}
+}
+
+func TestGatewayRateLimitValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*v1alpha1.MailoutGateway)
+		admit   bool
+		message string
+	}{
+		{
+			name: "valid standalone store",
+			mutate: func(gw *v1alpha1.MailoutGateway) {
+				gw.Spec.RateLimit = &v1alpha1.RateLimitSpec{
+					Store:             v1alpha1.RateLimitStoreSpec{Addresses: []string{"valkey:6379"}},
+					MessagesPerMinute: ptr.To(int32(60)),
+				}
+			},
+			admit: true,
+		},
+		{
+			name: "valid sentinel store",
+			mutate: func(gw *v1alpha1.MailoutGateway) {
+				gw.Spec.RateLimit = &v1alpha1.RateLimitSpec{
+					Store: v1alpha1.RateLimitStoreSpec{
+						Addresses:  []string{"s1:26379", "s2:26379", "s3:26379"},
+						MasterName: "mailout",
+					},
+					RecipientsPerMinute: ptr.To(int32(300)),
+				}
+			},
+			admit: true,
+		},
+		{
+			name: "address without a port",
+			mutate: func(gw *v1alpha1.MailoutGateway) {
+				gw.Spec.RateLimit = &v1alpha1.RateLimitSpec{
+					Store:             v1alpha1.RateLimitStoreSpec{Addresses: []string{"valkey"}},
+					MessagesPerMinute: ptr.To(int32(60)),
+				}
+			},
+			message: "host:port",
+		},
+		{
+			name: "no address at all",
+			mutate: func(gw *v1alpha1.MailoutGateway) {
+				gw.Spec.RateLimit = &v1alpha1.RateLimitSpec{
+					Store:             v1alpha1.RateLimitStoreSpec{},
+					MessagesPerMinute: ptr.To(int32(60)),
+				}
+			},
+			// Caught by the CRD's own MinItems before the webhook sees it.
+			message: "",
+		},
+		{
+			// Sentinel credentials without Sentinel: a configuration that would
+			// silently do nothing.
+			name: "sentinel credentials without masterName",
+			mutate: func(gw *v1alpha1.MailoutGateway) {
+				gw.Spec.RateLimit = &v1alpha1.RateLimitSpec{
+					Store: v1alpha1.RateLimitStoreSpec{
+						Addresses:             []string{"valkey:6379"},
+						SentinelAuthSecretRef: &v1alpha1.LocalObjectReference{Name: "sentinel-auth"},
+					},
+					MessagesPerMinute: ptr.To(int32(60)),
+				}
+			},
+			message: "masterName",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "rl" + strings.ReplaceAll(strings.ToLower(tc.name), " ", "")
+			err := createGateway(t, validGateway(name, tc.mutate))
+			if tc.admit {
+				if err != nil {
+					t.Fatalf("a valid rate limit was refused: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("an invalid rate limit was admitted")
+			}
+			if tc.message != "" && !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("the message should mention %q: %v", tc.message, err)
+			}
+		})
 	}
 }
 

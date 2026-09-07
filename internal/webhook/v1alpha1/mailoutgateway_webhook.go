@@ -8,6 +8,8 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
@@ -73,6 +75,7 @@ func (v *GatewayValidator) validate(gw *v1alpha1.MailoutGateway) (admission.Warn
 	errs = append(errs, validateMilters(gw.Spec.Milters, spec.Child("milters"))...)
 	errs = append(errs, validateDKIM(gw.Spec.DKIM, spec.Child("dkim"))...)
 	errs = append(errs, v.validateListeners(gw, spec.Child("listeners"))...)
+	errs = append(errs, validateRateLimit(gw.Spec.RateLimit, spec.Child("rateLimit"))...)
 
 	if gw.Spec.AllowedAccounts.Namespaces == v1alpha1.NamespacesFromSelector &&
 		gw.Spec.AllowedAccounts.Selector == nil {
@@ -92,6 +95,28 @@ func (v *GatewayValidator) validate(gw *v1alpha1.MailoutGateway) (admission.Warn
 		warnings = append(warnings, "spec.upstream.handlesDKIM is set, so the "+
 			"spec.dkim keys are declared but not used: the upstream signs instead")
 	}
+	if rl := gw.Spec.RateLimit; rl != nil {
+		if rl.MessagesPerMinute == nil && rl.RecipientsPerMinute == nil {
+			warnings = append(warnings, "spec.rateLimit declares a store but no limit: "+
+				"nothing is counted and nothing is enforced")
+		} else {
+			// Worth saying out loud at admission time, because it is the one
+			// surprising consequence of the design: the store joins the list of
+			// things that can stop mail.
+			warnings = append(warnings, "spec.rateLimit is set: the gateway fails closed, so mail stops "+
+				"with a 451 whenever the quota store is unreachable — deploy it with replicas")
+		}
+		if rl.Store.TLS != nil && rl.Store.TLS.InsecureSkipVerify {
+			warnings = append(warnings, "spec.rateLimit.store.tls.insecureSkipVerify is set: the store "+
+				"certificate is not verified, so the connection can be intercepted")
+		}
+		if rl.Store.MasterName == "" && len(rl.Store.Addresses) > 1 {
+			warnings = append(warnings, "spec.rateLimit.store lists several addresses without a masterName, "+
+				"so they are treated as a Redis Cluster; a primary with replicas behind Sentinel needs "+
+				"masterName set, and the gateway logs which mode it deduced at startup")
+		}
+	}
+
 	for i, m := range gw.Spec.Milters {
 		if m.FailOpen {
 			warnings = append(warnings, fmt.Sprintf(
@@ -227,6 +252,38 @@ func validateAllowedSenders(senders []string, path *field.Path) field.ErrorList 
 			errs = append(errs, field.Invalid(path.Index(i), entry,
 				"wildcards are not supported in the domain; list each domain"))
 		}
+	}
+	return errs
+}
+
+// validateRateLimit checks what the CRD schema cannot: that the addresses look
+// like host:port, and that a quota is not declared without somewhere to count.
+func validateRateLimit(spec *v1alpha1.RateLimitSpec, path *field.Path) field.ErrorList {
+	if spec == nil {
+		return nil
+	}
+	var errs field.ErrorList
+	store := path.Child("store")
+	if len(spec.Store.Addresses) == 0 {
+		errs = append(errs, field.Required(store.Child("addresses"),
+			"at least one address is required; the store is referenced, never deployed by the operator"))
+	}
+	for i, addr := range spec.Store.Addresses {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil || host == "" || port == "" {
+			errs = append(errs, field.Invalid(store.Child("addresses").Index(i), addr,
+				"must be host:port"))
+			continue
+		}
+		if _, err := strconv.Atoi(port); err != nil {
+			errs = append(errs, field.Invalid(store.Child("addresses").Index(i), addr,
+				"the port must be a number"))
+		}
+	}
+	if spec.Store.SentinelAuthSecretRef != nil && spec.Store.MasterName == "" {
+		errs = append(errs, field.Invalid(store.Child("sentinelAuthSecretRef"),
+			spec.Store.SentinelAuthSecretRef.Name,
+			"only meaningful with masterName, which is what selects Sentinel"))
 	}
 	return errs
 }

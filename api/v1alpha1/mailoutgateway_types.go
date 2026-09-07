@@ -36,8 +36,97 @@ type MailoutGatewaySpec struct {
 	// +optional
 	AllowedAccounts AllowedAccountsSpec `json:"allowedAccounts,omitempty"`
 
+	// RateLimit caps what each account of this gateway may send, counted in a
+	// store shared by every replica.
+	// +optional
+	RateLimit *RateLimitSpec `json:"rateLimit,omitempty"`
+
 	// +optional
 	Deployment DeploymentSpec `json:"deployment,omitempty"`
+}
+
+// RateLimitSpec caps what each account may send, per minute, counted in a
+// shared store so that the limit is the gateway's and not each replica's.
+//
+// The quota is the same for every account of the gateway. It is deliberately
+// not overridable per account: a MailoutAccount lives in its tenant's own
+// namespace, so an override there would be the tenant setting its own quota. An
+// account that needs a different limit belongs on a different gateway.
+type RateLimitSpec struct {
+	// Store is where the counters live. Referenced, never deployed: the store
+	// is infrastructure with its own lifecycle, and mailout does not run one for
+	// you.
+	Store RateLimitStoreSpec `json:"store"`
+
+	// MessagesPerMinute caps how many messages an account may submit. Zero
+	// leaves messages uncounted.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MessagesPerMinute *int32 `json:"messagesPerMinute,omitempty"`
+
+	// RecipientsPerMinute caps the recipients across those messages. Counted
+	// separately because a thousand messages to one recipient and one message to
+	// a thousand recipients are the same amount of mail, and a message count
+	// only catches the first.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	RecipientsPerMinute *int32 `json:"recipientsPerMinute,omitempty"`
+}
+
+// RateLimitStoreSpec points at a Redis-compatible store — Valkey, in
+// particular. The relay fails closed when it cannot be reached, so this is on
+// the critical path of every message: deploy it with replicas.
+type RateLimitStoreSpec struct {
+	// Addresses is one address for a standalone server, the Sentinel addresses
+	// when masterName is set, or the seed nodes of a cluster.
+	//
+	// Several addresses without a masterName means cluster mode. A plain
+	// primary-and-replicas trio listed here without one would be taken for a
+	// cluster; the gateway logs which mode it deduced at startup.
+	// +kubebuilder:validation:MinItems=1
+	Addresses []string `json:"addresses"`
+
+	// MasterName is the Sentinel master name. Set it for a Valkey deployed as
+	// one primary and two replicas behind Sentinel.
+	// +optional
+	MasterName string `json:"masterName,omitempty"`
+
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	DB int32 `json:"db,omitempty"`
+
+	// AuthSecretRef holds the store credentials, in the username and password
+	// keys. A store with only a password needs the password key alone.
+	// +optional
+	AuthSecretRef *LocalObjectReference `json:"authSecretRef,omitempty"`
+
+	// SentinelAuthSecretRef holds the credentials of the Sentinels themselves,
+	// which are usually distinct from the store's own.
+	// +optional
+	SentinelAuthSecretRef *LocalObjectReference `json:"sentinelAuthSecretRef,omitempty"`
+
+	// TLS, when present, connects over TLS.
+	// +optional
+	TLS *RateLimitStoreTLSSpec `json:"tls,omitempty"`
+
+	// Timeout bounds every call to the store. It sits on the path of every
+	// message, so keep it short: failing closed is meant to refuse quickly, not
+	// to hang. Defaults to 2s.
+	// +optional
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
+}
+
+// RateLimitStoreTLSSpec configures the TLS connection to the store. Its mere
+// presence turns TLS on.
+type RateLimitStoreTLSSpec struct {
+	// CASecretRef restricts verification to this CA, read from the ca.crt key.
+	// +optional
+	CASecretRef *SecretKeySelector `json:"caSecretRef,omitempty"`
+
+	// InsecureSkipVerify disables certificate verification. For a self-signed
+	// test store only.
+	// +optional
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
 
 // ListenersSpec selects the sockets the gateway serves. Both listeners
