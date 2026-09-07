@@ -1,0 +1,52 @@
+# One relay, in the operator's namespace. The upstream credentials stay here,
+# out of reach of the tenant namespaces that attach accounts to it.
+apiVersion: mailout.daly.nc/v1alpha1
+kind: MailoutGateway
+metadata:
+  name: default
+  namespace: mailout-system
+spec:
+  hostname: mail.example.com
+  listeners:
+    submission:
+      port: 587
+    smtps:
+      port: 465
+  tls:
+    # Let the operator create and own the cert-manager Certificate.
+    issuerRef:
+      name: letsencrypt
+      kind: ClusterIssuer
+    dnsNames:
+      - mail.example.com
+  upstream:
+    host: smtp.provider.example
+    port: 587
+    tls: StartTLS
+    authSecretRef:
+      name: upstream-credentials
+  dkim:
+    - domain: example.com
+      selector: mail
+      privateKeySecretRef:
+        name: dkim-example-com
+  milters:
+    - name: clamav
+      address: tcp://clamav-milter.security.svc:7357
+      timeout: 30s
+      # failOpen left off: mail waits rather than going out unscanned.
+  allowedAccounts:
+    namespaces: All
+  deployment:
+    replicas: 2
+    serviceType: ClusterIP
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: upstream-credentials
+  namespace: mailout-system
+type: Opaque
+stringData:
+  username: relay@example.com
+  password: replace-me

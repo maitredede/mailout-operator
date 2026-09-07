@@ -1,0 +1,31 @@
+# One application's account, in the application's own namespace. The operator
+# generates the password and writes it to the Secret named here; the cleartext
+# exists nowhere else.
+apiVersion: mailout.daly.nc/v1alpha1
+kind: MailoutAccount
+metadata:
+  name: invoicing
+  namespace: billing
+spec:
+  gatewayRef:
+    name: default
+    # namespace defaults to the operator's namespace
+  secretRef:
+    name: invoicing-smtp
+  # Change this value to rotate the password.
+  rotation: "2026-09-07"
+---
+# What the application consumes. Written entirely by the operator.
+#
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: invoicing-smtp
+#   namespace: billing
+# type: kubernetes.io/basic-auth
+# data:
+#   username: billing.invoicing
+#   password: <generated>
+#   host: default.mailout-system.svc
+#   port: "587"
+#   tls: starttls
