@@ -1,0 +1,5 @@
+/bin/
+/dist/
+*.test
+cover.out
+deploy/compose/certs/
