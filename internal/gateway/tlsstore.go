@@ -78,14 +78,6 @@ func (s *certStore) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate
 	return s.defaultCrt, nil
 }
 
-// tlsConfig returns the server-side TLS configuration serving this store.
-func (s *certStore) tlsConfig() *tls.Config {
-	return &tls.Config{
-		MinVersion:     tls.VersionTLS12,
-		GetCertificate: s.getCertificate,
-	}
-}
-
 func loadKeyPair(ref CertificateRef) (*tls.Certificate, error) {
 	certPEM, keyPEM := []byte(ref.CertPEM), []byte(ref.KeyPEM)
 	if ref.CertFile != "" {

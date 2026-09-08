@@ -1,0 +1,39 @@
+version: "2"
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+    rules:
+      # controller-runtime deprecated scheme.Builder to keep api packages free of
+      # its own dependency. Doing without it means hand-rolling scheme
+      # registration in every api package — a change to kubebuilder scaffolding
+      # that buys nothing here, since these packages are only ever imported by
+      # this operator.
+      - path: (api/v1alpha1|internal/certmanager/v1|internal/monitoring/v1)/
+        linters:
+          - staticcheck
+        text: "SA1019.*scheme.Builder"
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

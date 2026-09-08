@@ -1,4 +1,18 @@
-name: ci
+# CI mailout-operator, sur le runner ARC de dalykube.
+#
+# Workflows réutilisables épinglés par SHA (politique de pin : README de maitredede/ci).
+#
+# Répartition des runners, et pourquoi elle est mixte : `make test-e2e` et
+# `make test-cluster` pilotent des conteneurs (testcontainers → Mailpit, ClamAV,
+# Valkey, un k3s entier). Il leur faut une API Docker, que le runner ARC n'a pas :
+# les images partent vers les daemons BuildKit distants, il n'y a pas de socket
+# Docker, et le namespace arc-runners est en Pod Security « restricted » — donc
+# pas de DinD privilégié non plus. Ces deux niveaux tournent donc sur
+# ubuntu-latest (minutes GitHub facturées sur un dépôt privé), le reste sur le
+# runner local. Ce sont eux qui trouvent le plus de bugs : les supprimer pour
+# économiser des minutes laisserait la haute dispo et le cloisonnement des
+# locataires sans aucun filet automatique.
+name: CI
 
 on:
   push:
@@ -8,30 +22,79 @@ on:
 permissions:
   contents: read
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Verify generated code is up to date
-        run: |
-          make generate manifests
-          git diff --exit-code
-      - run: make lint
-      - run: make build
-      - run: make test
-      - run: make test-envtest
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
-  e2e:
-    runs-on: ubuntu-latest
+jobs:
+  go:
+    uses: maitredede/ci/.github/workflows/go-ci.yml@f7c8befa0a4216b1923b902321b6018b97537acf # main 2026-09-07 (gofmt hors submodules)
+    with:
+      runner: arc-runner-mailout-operator
+      # `go test ./...` ne lance que les tests unitaires : les trois autres
+      # niveaux sont derrière les tags envtest / e2e / cluster.
+      #
+      # `race: false` (défaut du workflow réutilisable) : le détecteur de course
+      # exige cgo, absent de l'image ghcr.io/actions/actions-runner.
+
+  # Niveau 2 des tests : contrôleurs et webhooks contre un vrai control plane.
+  # Pas de conteneur là-dedans — setup-envtest télécharge les binaires
+  # kube-apiserver et etcd et les lance en processus.
+  envtest:
+    name: Envtest
+    runs-on: arc-runner-mailout-operator
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache-dependency-path: go.sum
+          cache: true
+
+      # controller-gen produit les CRD et le code deepcopy. S'ils diffèrent de ce
+      # qui est versionné, un `make manifests` a été oublié : le cluster
+      # recevrait des CRD qui ne décrivent pas les types du binaire.
+      - name: Manifests à jour
+        run: |
+          set -euo pipefail
+          make generate manifests
+          if ! git diff --exit-code; then
+            echo "::error::config/ et zz_generated ne correspondent pas au code : lancer make generate manifests"
+            exit 1
+          fi
+
+      - name: make test-envtest
+        run: make test-envtest
+
+  # Niveau 3 : la vraie chaîne SMTP, Mailpit / ClamAV / Valkey en conteneurs.
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
           cache: true
       - run: make test-e2e
+
+  # Niveau 4 : l'opérateur contre un k3s jetable. C'est le seul niveau qui
+  # vérifie les deux replicas et le leader unique, et le seul qui prouve qu'un
+  # locataire ne peut pas faire signer le domaine d'un autre — un manifeste peut
+  # être parfaitement valide et produire un conteneur qui ne démarre pas.
+  cluster:
+    name: Cluster
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+          cache: true
+      - run: make test-cluster
