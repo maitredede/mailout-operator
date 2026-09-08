@@ -16,6 +16,27 @@ import (
 // latency against offline-cracking resistance.
 const BcryptCost = 12
 
+// MinBcryptCost and MaxBcryptCost bound what the gateway will serve.
+//
+// This is not tuning, it is a denial of service control. The hash reaches the
+// shared configuration from a Secret in the tenant's own namespace, so the cost
+// encoded in it is attacker-chosen: a $2a$31$ hash makes every AUTH attempt on
+// that username burn hours of CPU inside the connection handler, for every
+// replica, and AUTH is pre-authentication. The band is wide enough to survive
+// a future change of BcryptCost without regenerating every password, and
+// narrow enough that no cost in it can be weaponised.
+const (
+	MinBcryptCost = 10
+	MaxBcryptCost = 14
+)
+
+// UsableHash reports whether a stored hash is one the gateway will authenticate
+// against: parseable by bcrypt, and of a cost inside the band.
+func UsableHash(hash string) bool {
+	cost, err := bcrypt.Cost([]byte(hash))
+	return err == nil && cost >= MinBcryptCost && cost <= MaxBcryptCost
+}
+
 // PasswordBytes is the entropy of a generated password, before base64 encoding.
 const PasswordBytes = 24
 
@@ -66,9 +87,19 @@ func newAccountStore(accounts []Account) *accountStore {
 	}
 	// Cost 4 would be cheaper but would not equalize anything; use the real
 	// cost so the timings actually match.
-	if h, err := bcrypt.GenerateFromPassword([]byte(dummyPassword), BcryptCost); err == nil {
-		s.dummyHash = string(h)
+	//
+	// A dropped error here used to leave dummyHash empty, which turned the
+	// equalization below into a no-op: an unknown username then answered in
+	// nanoseconds against ~180ms for a known one — a perfect account
+	// enumeration oracle. dummyPassword is a compile-time constant, so a
+	// failure here cannot depend on input: it can only mean the process is
+	// unable to compute bcrypt at all, and then refusing to serve is the only
+	// honest answer.
+	h, err := bcrypt.GenerateFromPassword([]byte(dummyPassword), BcryptCost)
+	if err != nil {
+		panic(fmt.Sprintf("cannot hash the timing equalizer, bcrypt is unusable: %v", err))
 	}
+	s.dummyHash = string(h)
 	return s
 }
 

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/semaphore"
 )
 
 // snapshot is everything the dataplane derives from one Config. It is built
@@ -148,6 +150,16 @@ type Server struct {
 	metrics *Metrics
 	current atomic.Pointer[snapshot]
 
+	// verifying bounds how many password verifications run at once.
+	//
+	// bcrypt at cost 12 is ~180ms of CPU by design, and AUTH is
+	// pre-authentication with no cost to the client: without this, a handful of
+	// connections looping AUTH with a wrong password consume every core the pod
+	// has, and the relay stops answering for every tenant. It belongs to the
+	// process rather than to a configuration snapshot, so a reload cannot widen
+	// it. One core is left for everything else.
+	verifying *semaphore.Weighted
+
 	mu      sync.Mutex
 	servers []*smtp.Server
 
@@ -179,7 +191,7 @@ func NewServer(cfg *Config, log *slog.Logger, opts ...ServerOption) (*Server, er
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{log: log}
+	s := &Server{log: log, verifying: semaphore.NewWeighted(int64(max(1, runtime.GOMAXPROCS(0)-1)))}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -351,7 +363,20 @@ type session struct {
 	account *Account
 	from    string
 	to      []string
+
+	// authFailures counts refusals on this connection. go-smtp does not treat a
+	// refused AUTH as a protocol error, so its own error threshold never fires
+	// and a single connection can ask forever.
+	authFailures int
 }
+
+// authVerifyTimeout bounds how long a connection waits for a verification slot.
+const authVerifyTimeout = 10 * time.Second
+
+// maxAuthFailures is how many password verifications one connection may cost
+// before it stops being served. Reconnecting resets it, but that costs the
+// attacker a TCP and TLS handshake for every three attempts instead of none.
+const maxAuthFailures = 3
 
 var _ smtp.AuthSession = (*session)(nil)
 
@@ -373,8 +398,32 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 }
 
 func (s *session) authenticate(username, password string) error {
+	if s.authFailures >= maxAuthFailures {
+		// Refused without verifying anything: past this point the connection
+		// has shown what it is, and every further attempt would be free CPU for
+		// it and none for anyone else.
+		s.server.log.Warn("too many authentication failures, closing",
+			"remote", s.remoteAddr(), "attempts", s.authFailures)
+		_ = s.conn.Close()
+		return errTooManyAuthFailures()
+	}
+
+	// The semaphore, not the counter, is what bounds the damage: the counter is
+	// per connection and an attacker simply opens more, while this holds
+	// whatever the number of connections. The wait is bounded so that a flood
+	// answers 451 to honest clients instead of pinning their sessions — no
+	// request context reaches this callback, hence Background.
+	ctx, cancel := context.WithTimeout(context.Background(), authVerifyTimeout)
+	defer cancel()
+	if err := s.server.verifying.Acquire(ctx, 1); err != nil {
+		s.server.log.Warn("password verification saturated, deferring",
+			"remote", s.remoteAddr(), "timeout", authVerifyTimeout)
+		return errAuthBusy()
+	}
 	acct, err := s.snap.accounts.authenticate(username, password)
+	s.server.verifying.Release(1)
 	if err != nil {
+		s.authFailures++
 		s.server.log.Warn("authentication refused",
 			"username", username, "remote", s.remoteAddr(), "reason", err)
 		// Only a username the gateway actually serves becomes a label: the one
@@ -406,6 +455,27 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 
 // errSenderNotAllowed is a permanent refusal: the account is not configured for
 // this sender, and retrying will not change that.
+// errTooManyAuthFailures ends the conversation. 421 is the code that tells a
+// client the service is closing the channel, which is exactly what happens.
+func errTooManyAuthFailures() *smtp.SMTPError {
+	return &smtp.SMTPError{
+		Code:         421,
+		EnhancedCode: smtp.EnhancedCode{4, 7, 0},
+		Message:      "Too many authentication failures",
+	}
+}
+
+// errAuthBusy is temporary: the relay could not verify the password in time
+// because it is already verifying as many as it can. A well-behaved client
+// retries, and the mail is not lost.
+func errAuthBusy() *smtp.SMTPError {
+	return &smtp.SMTPError{
+		Code:         451,
+		EnhancedCode: smtp.EnhancedCode{4, 3, 2},
+		Message:      "Too busy to verify credentials, try again later",
+	}
+}
+
 func errSenderNotAllowed(address string) *smtp.SMTPError {
 	return &smtp.SMTPError{
 		Code:         550,

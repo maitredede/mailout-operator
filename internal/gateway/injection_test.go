@@ -53,9 +53,10 @@ func TestValidUsername(t *testing.T) {
 // An account whose username could inject must not be served at all: it is the
 // one value that reaches a header of every message it sends.
 func TestPartitionAccountsRejectsAnInjectingUsername(t *testing.T) {
+	hash := mustHash(t, "pw")
 	cfg := &Config{Accounts: []Account{
-		{Username: "good", PasswordHash: "hash"},
-		{Username: injectingUsername, PasswordHash: "hash"},
+		{Username: "good", PasswordHash: hash},
+		{Username: injectingUsername, PasswordHash: hash},
 	}}
 	served, rejected := cfg.PartitionAccounts()
 

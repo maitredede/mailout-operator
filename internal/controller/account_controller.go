@@ -110,7 +110,12 @@ func (r *AccountReconciler) reconcileSecret(ctx context.Context, account *v1alph
 		existingHash := string(secret.Data[render.PasswordHashKey])
 
 		password, hash := existingPassword, existingHash
-		if password == "" || hash == "" || rotationChanged {
+		// A hash that is not one the gateway will serve is treated as absent
+		// and replaced. The Secret lives in the tenant's namespace, so its
+		// contents are not the operator's word: a hand-written $2a$31$ hash
+		// would otherwise reach the shared configuration and make every AUTH
+		// attempt on that username burn hours of CPU on every replica.
+		if password == "" || hash == "" || rotationChanged || !gateway.UsableHash(hash) {
 			password, err = gateway.GeneratePassword()
 			if err != nil {
 				return err

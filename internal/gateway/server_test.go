@@ -581,11 +581,14 @@ func TestBrokenAccountDoesNotStopTheGateway(t *testing.T) {
 }
 
 func TestPartitionAccounts(t *testing.T) {
+	// Real hashes: PartitionAccounts now parses them, because a hash whose cost
+	// is chosen by whoever wrote the Secret is a denial of service.
+	hash := mustHash(t, "pw")
 	cfg := &Config{Accounts: []Account{
-		{Username: "good", PasswordHash: "$2a$12$x"},
-		{Username: "", PasswordHash: "$2a$12$x"},
+		{Username: "good", PasswordHash: hash},
+		{Username: "", PasswordHash: hash},
 		{Username: "nohash"},
-		{Username: "good", PasswordHash: "$2a$12$y"},
+		{Username: "good", PasswordHash: hash},
 	}}
 	served, rejected := cfg.PartitionAccounts()
 	if len(served) != 1 || served[0].Username != "good" {

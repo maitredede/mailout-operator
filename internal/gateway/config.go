@@ -181,6 +181,13 @@ func (c *Config) PartitionAccounts() (served []Account, rejected []RejectedAccou
 				Username: account.Username,
 				Reason:   "passwordHash is required",
 			})
+		case !UsableHash(account.PasswordHash):
+			rejected = append(rejected, RejectedAccount{
+				Username: account.Username,
+				Reason: fmt.Sprintf("passwordHash must be a bcrypt hash of cost %d to %d; "+
+					"a malformed hash answers instantly and a costly one stalls the relay",
+					MinBcryptCost, MaxBcryptCost),
+			})
 		default:
 			seen[account.Username] = true
 			served = append(served, account)
