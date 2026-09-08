@@ -23,6 +23,33 @@ kubectl get mailoutaccounts -A \
 An empty `USER` means the default `<namespace>.<name>`, which is checked too —
 a long namespace plus a long object name can exceed 128 characters together.
 
+**`spec.username`, when you set it, must start with `<namespace>.`** The default
+already does. Without this, a tenant on a shared gateway could name any
+username it liked: claim another tenant's before they exist and their account is
+refused at admission, or race them and the winner was settled by list order —
+alphabetically, so a namespace called `aaa-` beat one called `zzz-`. The winner
+took the SMTP identity along with the `allowedSenders` and `milters.disable`
+attached to it. To find the accounts that need changing:
+
+```bash
+kubectl get mailoutaccounts -A -o json | jq -r '
+  .items[] | select(.spec.username != null)
+  | select(.spec.username | startswith(.metadata.namespace + ".") | not)
+  | "\(.metadata.namespace)/\(.metadata.name): \(.spec.username)"'
+```
+
+Changing a username changes the credential the application authenticates with;
+the operator rewrites the Secret, so an application that reads it at startup
+needs a restart.
+
+**`allowedSenders` is capped at 32 entries of 256 characters**, and
+`milters.disable` likewise. Unbounded, one account with a few hundred kilobytes
+of senders made the gateway's configuration Secret exceed the 1 MiB the API
+server allows — and since the previous Secret stays in service, the relay kept
+running while no change ever applied again, revocation included. Beyond the
+budget the operator now drops accounts largest first rather than failing the
+whole reconciliation.
+
 **A password hash outside cost 10–14 is regenerated.** The hash reaches the
 shared configuration from a Secret in the tenant's own namespace, so its cost
 was attacker-chosen: a hand-written `$2a$31$` hash made every authentication

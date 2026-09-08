@@ -288,23 +288,26 @@ func TestAccountRefusedOnUsernameConflict(t *testing.T) {
 	if err := createGateway(t, validGateway("conflictgw")); err != nil {
 		t.Fatalf("create gateway: %v", err)
 	}
-	first := newNamespace(t, "first")
-	second := newNamespace(t, "second")
+	// A username now has to be namespace-qualified, so a collision can only
+	// happen inside one namespace — which is the tenant's own business, but
+	// still has to be refused: two accounts sharing a username would make
+	// authentication ambiguous.
+	ns := newNamespace(t, "first")
 
-	makeAccount := func(namespace, name string) *v1alpha1.MailoutAccount {
+	makeAccount := func(name string) *v1alpha1.MailoutAccount {
 		return &v1alpha1.MailoutAccount{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 			Spec: v1alpha1.MailoutAccountSpec{
 				GatewayRef: v1alpha1.GatewayReference{Name: "conflictgw"},
 				SecretRef:  v1alpha1.LocalObjectReference{Name: name + "-smtp"},
-				Username:   "shared@example.test",
+				Username:   ns + ".shared",
 			},
 		}
 	}
-	if err := testClient.Create(t.Context(), makeAccount(first, "a")); err != nil {
+	if err := testClient.Create(t.Context(), makeAccount("a")); err != nil {
 		t.Fatalf("create first account: %v", err)
 	}
-	err := testClient.Create(t.Context(), makeAccount(second, "b"))
+	err := testClient.Create(t.Context(), makeAccount("b"))
 	if err == nil {
 		t.Fatal("a duplicate username was admitted")
 	}
@@ -480,6 +483,54 @@ func TestAccountUsernameRejectsControlCharacters(t *testing.T) {
 // account made that Secret unwritable — and since the previous one stays in
 // service, the relay kept running while no change ever applied again, so the
 // admin lost the ability to disable anyone.
+// A username outside its own namespace's space is how one tenant takes
+// another's SMTP identity: name it first and the legitimate account is refused,
+// or race it and the winner is decided by list order — alphabetically, so a
+// namespace called aaa- beats one called zzz-.
+func TestAccountUsernameMustBeNamespaceQualified(t *testing.T) {
+	if err := createGateway(t, validGateway("qualified")); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	victim := newNamespace(t, "zzz-victim")
+	attacker := newNamespace(t, "aaa-attacker")
+
+	// The attacker naming the victim's identity, before the victim exists.
+	err := testClient.Create(t.Context(), &v1alpha1.MailoutAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "evil", Namespace: attacker},
+		Spec: v1alpha1.MailoutAccountSpec{
+			GatewayRef: v1alpha1.GatewayReference{Name: "qualified"},
+			SecretRef:  v1alpha1.LocalObjectReference{Name: "evil-smtp"},
+			Username:   victim + ".app",
+		},
+	})
+	if err == nil {
+		t.Fatalf("an account in %s claimed the username %s.app", attacker, victim)
+	}
+
+	// Its own namespace, on the other hand, is its own business.
+	if err := testClient.Create(t.Context(), &v1alpha1.MailoutAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "legit", Namespace: attacker},
+		Spec: v1alpha1.MailoutAccountSpec{
+			GatewayRef: v1alpha1.GatewayReference{Name: "qualified"},
+			SecretRef:  v1alpha1.LocalObjectReference{Name: "legit-smtp"},
+			Username:   attacker + ".whatever-it-likes",
+		},
+	}); err != nil {
+		t.Errorf("an account naming an identity inside its own namespace was refused: %v", err)
+	}
+
+	// And the default needs no help.
+	if err := testClient.Create(t.Context(), &v1alpha1.MailoutAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: victim},
+		Spec: v1alpha1.MailoutAccountSpec{
+			GatewayRef: v1alpha1.GatewayReference{Name: "qualified"},
+			SecretRef:  v1alpha1.LocalObjectReference{Name: "app-smtp"},
+		},
+	}); err != nil {
+		t.Errorf("the default username was refused: %v", err)
+	}
+}
+
 func TestAccountAllowedSendersAreBounded(t *testing.T) {
 	if err := createGateway(t, validGateway("bounded")); err != nil {
 		t.Fatalf("create gateway: %v", err)

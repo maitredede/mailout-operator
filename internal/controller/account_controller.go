@@ -160,9 +160,20 @@ func (r *AccountReconciler) usernameConflict(ctx context.Context, account *v1alp
 		if UsernameFor(other) != username {
 			continue
 		}
-		// The older object keeps the name; creation order is what breaks the
-		// tie, so the outcome does not depend on reconciliation order.
-		if other.CreationTimestamp.Before(&account.CreationTimestamp) {
+		// The older object keeps the name, so the outcome does not depend on
+		// reconciliation order. Creation order alone is not enough to decide
+		// it: metav1.Time serializes to the second, so two objects created
+		// 300ms apart come back with identical timestamps and Before() is
+		// false in both directions — neither would be marked in conflict, both
+		// would be provisioned, and the winner would be settled by list order.
+		// The UID breaks that tie arbitrarily but consistently, which is all
+		// that is needed.
+		switch {
+		case other.CreationTimestamp.Before(&account.CreationTimestamp):
+			return other.Namespace + "/" + other.Name, nil
+		case account.CreationTimestamp.Before(&other.CreationTimestamp):
+			continue
+		case string(other.UID) < string(account.UID):
 			return other.Namespace + "/" + other.Name, nil
 		}
 	}

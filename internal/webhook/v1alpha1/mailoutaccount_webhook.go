@@ -5,6 +5,7 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
 	"github.com/maitredede/mailout-operator/internal/controller"
@@ -93,6 +94,27 @@ func (v *AccountValidator) validate(ctx context.Context, account *v1alpha1.Mailo
 	// actually get. Checking the effective value here is what makes a namespace
 	// or an object name too long for a username fail at kubectl apply, instead
 	// of leaving the account silently dropped from the served configuration.
+	// A username must live in its own namespace's space.
+	//
+	// Without this a tenant picks any name it likes on a shared gateway,
+	// including one another tenant already uses or is about to: name it first
+	// and the legitimate account is refused at admission, or race it and the
+	// winner is settled by list order — alphabetically, so a namespace called
+	// aaa- beats one called zzz-. Either way one tenant takes another's SMTP
+	// identity, and with it the allowedSenders and the milters.disable that go
+	// with that identity.
+	//
+	// Requiring the prefix removes the possibility rather than adjudicating it.
+	// The default, <namespace>.<name>, already satisfies it.
+	if explicit := account.Spec.Username; explicit != "" {
+		prefix := account.Namespace + "."
+		if !strings.HasPrefix(explicit, prefix) {
+			errs = append(errs, field.Invalid(spec.Child("username"), explicit,
+				fmt.Sprintf("must start with %q, so that a username cannot name an identity "+
+					"outside its own namespace", prefix)))
+		}
+	}
+
 	if username := controller.UsernameFor(account); !gateway.ValidUsername(username) {
 		path := spec.Child("username")
 		detail := fmt.Sprintf("must be at most %d printable ASCII characters, "+

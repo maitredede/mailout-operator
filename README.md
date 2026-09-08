@@ -99,6 +99,10 @@ The decisions worth knowing about:
   the domain delegated to them, and signing on top would produce a second
   signature that breaks as soon as they rewrite the body for link tracking —
   arriving as `dkim=fail` in your DMARC reports for no benefit.
+- **A username belongs to its namespace.** `spec.username` defaults to
+  `<namespace>.<name>` and, if you set it, must start with `<namespace>.`. On a
+  shared gateway that is what stops one tenant naming — and taking — another's
+  SMTP identity, along with the `allowedSenders` attached to it.
 - **One tenant's mistake stays its own.** An account that cannot be served is
   dropped from the configuration with the reason in its status; the relay keeps
   running for everyone else.
