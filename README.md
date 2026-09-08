@@ -252,6 +252,27 @@ Every label is bounded by configuration, never by traffic — which is why an
 authentication failure on a username no account has is reported as `<unknown>`
 rather than under the name that was tried.
 
+A Grafana dashboard covering all of it ships as a ConfigMap for Grafana's
+sidecar:
+
+```bash
+kubectl apply -k config/grafana
+```
+
+It is not part of `config/default`, and deliberately so: unlike the
+`ServiceMonitor`, nothing about a Grafana install can be detected. The label the
+sidecar selects on and the namespace it searches are both configurable, so
+applying this blind would either be ignored or land where nothing reads it.
+Check `sidecar.dashboards.label` and `searchNamespace` against your install; the
+manifest uses the usual `grafana_dashboard: "1"` in `mailout-system`. Or import
+`config/grafana/mailout.json` by hand.
+
+One dashboard covers every gateway — it describes the shape of the metrics, and
+the gateway is a variable in it. A unit test asserts that each metric it queries
+is one the dataplane exposes, and that none is left off a panel: a renamed
+metric would otherwise leave a graph empty, which reads as "nothing is
+happening" rather than as a fault.
+
 ## Try it without a cluster
 
 The dataplane has no dependency on the Kubernetes API: it reads a YAML file, and

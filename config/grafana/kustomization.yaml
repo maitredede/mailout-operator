@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# A Grafana dashboard for the gateway's metrics, as a ConfigMap for Grafana's
+# sidecar to pick up:
+#
+#   kubectl apply -k config/grafana
+#
+# Deliberately not part of config/default. Unlike the ServiceMonitor — which the
+# operator creates by itself once prometheus-operator's CRD is served — nothing
+# here can be detected: the sidecar's label key is configurable, and so is the
+# namespace it searches. Applying this blind would either be ignored or land in
+# the wrong place, so it stays an explicit opt-in.
+#
+# The dashboard is a single ConfigMap for the whole install, not one per
+# gateway: it describes the shape of the metrics, and the gateway is a variable
+# inside it.
+
+namespace: mailout-system
+
+configMapGenerator:
+  - name: mailout-dashboard
+    files:
+      - mailout.json
+    options:
+      labels:
+        # What the sidecar selects on. The chart's default labelValue is empty,
+        # which matches any value; "1" is the convention kube-prometheus-stack
+        # and the Grafana chart's own examples use.
+        grafana_dashboard: "1"
+      annotations:
+        # Only honoured if the sidecar was started with
+        # sidecar.dashboards.folderAnnotation set to this key — it has no
+        # default. kube-prometheus-stack sets it to grafana_folder.
+        grafana_folder: Mailout
+
+generatorOptions:
+  # The sidecar selects by label, not by name: a hash suffix would leave the
+  # previous ConfigMap behind, and Grafana would keep serving both dashboards.
+  disableNameSuffixHash: true

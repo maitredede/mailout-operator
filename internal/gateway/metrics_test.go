@@ -4,10 +4,13 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -244,4 +247,65 @@ func getWithRetry(t *testing.T, url string) string {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// The dashboard in config/grafana names metrics as strings, so nothing but a
+// test connects it to the collectors. Renaming a metric would otherwise leave
+// panels silently empty — the worst kind of monitoring failure, because an
+// empty graph reads as "nothing is happening".
+func TestGrafanaDashboardOnlyUsesMetricsWeExpose(t *testing.T) {
+	const dashboard = "../../config/grafana/mailout.json"
+
+	raw, err := os.ReadFile(dashboard)
+	if err != nil {
+		t.Fatalf("read %s: %v", dashboard, err)
+	}
+	var parsed any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("%s is not valid JSON: %v", dashboard, err)
+	}
+
+	exposed := exposedMetricNames(t)
+	seen := map[string]bool{}
+	for _, name := range regexp.MustCompile(`mailout_[a-z_]+`).FindAllString(string(raw), -1) {
+		// A histogram is queried through its derived series, which no registry
+		// reports as a family of its own.
+		base := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(name, "_bucket"), "_sum"), "_count")
+		if !exposed[base] {
+			t.Errorf("dashboard queries %q, which the gateway does not expose", name)
+		}
+		seen[base] = true
+	}
+	for name := range exposed {
+		if !seen[name] {
+			t.Errorf("metric %q is exposed but appears on no panel", name)
+		}
+	}
+}
+
+// exposedMetricNames gathers every mailout metric after exercising each
+// recorder once, since a counter that has never been incremented is not
+// reported at all.
+func exposedMetricNames(t *testing.T) map[string]bool {
+	t.Helper()
+	m := NewMetrics()
+	m.messageRelayed("account", 1)
+	m.authFailed("account")
+	m.milterDecided("milter", decisionAccept)
+	m.dkimResult("example.test", dkimSigned)
+	m.rateLimitDecided("account", rateLimitAllowed)
+	m.upstreamDelivered(time.Millisecond)
+	m.configReloaded("success", 1, 0)
+
+	families, err := m.Registry().Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	names := map[string]bool{}
+	for _, family := range families {
+		if strings.HasPrefix(family.GetName(), "mailout_") {
+			names[family.GetName()] = true
+		}
+	}
+	return names
 }
