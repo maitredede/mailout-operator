@@ -134,12 +134,13 @@ func newTestChain(t *testing.T, filters ...Milter) *milterChain {
 	return chain
 }
 
-func testMessage() *Message {
+func testMessage(t *testing.T) *Message {
+	t.Helper()
 	return &Message{
 		From:    "app@example.test",
 		To:      []string{"dest@example.test"},
 		Account: "app1",
-		Data:    []byte("From: app@example.test\r\nSubject: hi\r\n\r\nclean body\r\n"),
+		Body:    bodyOf(t, []byte("From: app@example.test\r\nSubject: hi\r\n\r\nclean body\r\n")),
 	}
 }
 
@@ -159,15 +160,15 @@ func TestMilterChainAddsHeaderAndPassesSessionInfo(t *testing.T) {
 	backend := &testMilterBackend{addHeader: "scanned"}
 	chain := newTestChain(t, Milter{Name: "test", Address: startTestMilter(t, backend)})
 
-	msg := testMessage()
+	msg := testMessage(t)
 	if err := chain.run(t.Context(), msg, testSessionInfo()); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(string(msg.Data), "X-Test-Filter: scanned") {
-		t.Fatalf("header not applied:\n%s", msg.Data)
+	if !strings.Contains(string(bytesOf(t, msg)), "X-Test-Filter: scanned") {
+		t.Fatalf("header not applied:\n%s", bytesOf(t, msg))
 	}
-	if !strings.Contains(string(msg.Data), "clean body") {
-		t.Fatalf("body altered:\n%s", msg.Data)
+	if !strings.Contains(string(bytesOf(t, msg)), "clean body") {
+		t.Fatalf("body altered:\n%s", bytesOf(t, msg))
 	}
 	authUser, tlsVersion := backend.observed()
 	if authUser != "app1" {
@@ -184,8 +185,10 @@ func TestMilterChainRejectionCarriesTheFiltersCode(t *testing.T) {
 		Address: startTestMilter(t, &testMilterBackend{rejectOn: eicarPattern}),
 	})
 
-	msg := testMessage()
-	msg.Data = []byte("Subject: infected\r\n\r\n" + eicarPattern + "\r\n")
+	msg := testMessage(t)
+	if err := msg.Body.Reset([]byte("Subject: infected\r\n\r\n" + eicarPattern + "\r\n")); err != nil {
+		t.Fatalf("reset body: %v", err)
+	}
 	err := chain.run(t.Context(), msg, testSessionInfo())
 	if err == nil {
 		t.Fatal("expected the message to be rejected")
@@ -200,18 +203,18 @@ func TestMilterChainReplacesBody(t *testing.T) {
 		Name:    "rewriter",
 		Address: startTestMilter(t, &testMilterBackend{replaceBody: "sanitized\r\n"}),
 	})
-	msg := testMessage()
+	msg := testMessage(t)
 	if err := chain.run(t.Context(), msg, testSessionInfo()); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if strings.Contains(string(msg.Data), "clean body") {
-		t.Fatalf("body not replaced:\n%s", msg.Data)
+	if strings.Contains(string(bytesOf(t, msg)), "clean body") {
+		t.Fatalf("body not replaced:\n%s", bytesOf(t, msg))
 	}
-	if !strings.Contains(string(msg.Data), "sanitized") {
-		t.Fatalf("replacement missing:\n%s", msg.Data)
+	if !strings.Contains(string(bytesOf(t, msg)), "sanitized") {
+		t.Fatalf("replacement missing:\n%s", bytesOf(t, msg))
 	}
-	if !strings.Contains(string(msg.Data), "Subject: hi") {
-		t.Fatalf("headers lost:\n%s", msg.Data)
+	if !strings.Contains(string(bytesOf(t, msg)), "Subject: hi") {
+		t.Fatalf("headers lost:\n%s", bytesOf(t, msg))
 	}
 }
 
@@ -220,7 +223,7 @@ func TestMilterChainDiscard(t *testing.T) {
 		Name:    "dropper",
 		Address: startTestMilter(t, &testMilterBackend{discard: true}),
 	})
-	err := chain.run(t.Context(), testMessage(), testSessionInfo())
+	err := chain.run(t.Context(), testMessage(t), testSessionInfo())
 	if !errors.Is(err, errDiscard) {
 		t.Fatalf("want errDiscard, got %v", err)
 	}
@@ -233,7 +236,7 @@ func TestMilterChainQuarantineBecomesRejection(t *testing.T) {
 		Name:    "quarantiner",
 		Address: startTestMilter(t, &testMilterBackend{quarantine: true}),
 	})
-	err := chain.run(t.Context(), testMessage(), testSessionInfo())
+	err := chain.run(t.Context(), testMessage(t), testSessionInfo())
 	if err == nil || !strings.Contains(err.Error(), "554") {
 		t.Fatalf("want a 554 rejection, got %v", err)
 	}
@@ -243,7 +246,7 @@ func TestMilterChainQuarantineBecomesRejection(t *testing.T) {
 // down must not silently turn the relay into a malware conduit.
 func TestMilterChainFailClosed(t *testing.T) {
 	chain := newTestChain(t, Milter{Name: "down", Address: "tcp://127.0.0.1:1"})
-	err := chain.run(t.Context(), testMessage(), testSessionInfo())
+	err := chain.run(t.Context(), testMessage(t), testSessionInfo())
 	if err == nil {
 		t.Fatal("expected an unreachable filter to reject the message")
 	}
@@ -254,7 +257,7 @@ func TestMilterChainFailClosed(t *testing.T) {
 
 func TestMilterChainFailOpen(t *testing.T) {
 	chain := newTestChain(t, Milter{Name: "down", Address: "tcp://127.0.0.1:1", FailOpen: true})
-	if err := chain.run(t.Context(), testMessage(), testSessionInfo()); err != nil {
+	if err := chain.run(t.Context(), testMessage(t), testSessionInfo()); err != nil {
 		t.Fatalf("failOpen should let the message through, got %v", err)
 	}
 }
@@ -269,12 +272,12 @@ func TestMilterChainRunsFiltersInOrder(t *testing.T) {
 	)
 	// The second filter only inspects the body, so it must not see the header
 	// the first one added — this pins that headers and body stay separate.
-	msg := testMessage()
+	msg := testMessage(t)
 	if err := chain.run(t.Context(), msg, testSessionInfo()); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(string(msg.Data), "X-Test-Filter: first") {
-		t.Fatalf("first filter's header missing:\n%s", msg.Data)
+	if !strings.Contains(string(bytesOf(t, msg)), "X-Test-Filter: first") {
+		t.Fatalf("first filter's header missing:\n%s", bytesOf(t, msg))
 	}
 }
 

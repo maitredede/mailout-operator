@@ -35,6 +35,11 @@ type fakeUpstream struct {
 	messages []receivedMessage
 	// rejectWith, when set, is returned instead of accepting the message.
 	rejectWith error
+	// discardBody drops the body instead of keeping it, so that a test can
+	// measure the gateway's own memory without this side of the connection
+	// holding a copy in the same process.
+	discardBody bool
+	bytesSeen   int64
 }
 
 func newFakeUpstream(t *testing.T) *fakeUpstream {
@@ -86,6 +91,25 @@ func (s *fakeUpstreamSession) Rcpt(to string, _ *smtp.RcptOptions) error {
 }
 
 func (s *fakeUpstreamSession) Data(r io.Reader) error {
+	s.up.mu.Lock()
+	discard := s.up.discardBody
+	s.up.mu.Unlock()
+
+	if discard {
+		n, err := io.Copy(io.Discard, r)
+		if err != nil {
+			return err
+		}
+		s.up.mu.Lock()
+		defer s.up.mu.Unlock()
+		if s.up.rejectWith != nil {
+			return s.up.rejectWith
+		}
+		s.up.bytesSeen = n
+		s.up.messages = append(s.up.messages, receivedMessage{From: s.from, To: s.to})
+		return nil
+	}
+
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -95,6 +119,7 @@ func (s *fakeUpstreamSession) Data(r io.Reader) error {
 	if s.up.rejectWith != nil {
 		return s.up.rejectWith
 	}
+	s.up.bytesSeen = int64(len(data))
 	s.up.messages = append(s.up.messages, receivedMessage{From: s.from, To: s.to, Data: data})
 	return nil
 }

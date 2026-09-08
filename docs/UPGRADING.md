@@ -1,5 +1,48 @@
 # Upgrading
 
+## To the hardening release
+
+Found by an adversarial review of the previous release. Two of these will refuse
+things your cluster accepted yesterday, so read the first two.
+
+**`spec.username` is now validated, and an account that fails is dropped.** The
+name reaches the `Received` header of every message the account sends, so a name
+containing a CR or LF let the account write headers — and a body — of its own
+choosing. It must now match
+`^[a-zA-Z0-9]([a-zA-Z0-9._@+-]{0,126}[a-zA-Z0-9])?$` and be at most 128
+characters. The API server refuses a new one that does not; an account created
+before this is dropped from the served configuration with the reason in its
+status, and the relay keeps running for everyone else. To find them before
+upgrading:
+
+```bash
+kubectl get mailoutaccounts -A \
+  -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,USER:.spec.username
+```
+
+An empty `USER` means the default `<namespace>.<name>`, which is checked too —
+a long namespace plus a long object name can exceed 128 characters together.
+
+**A password hash outside cost 10–14 is regenerated.** The hash reaches the
+shared configuration from a Secret in the tenant's own namespace, so its cost
+was attacker-chosen: a hand-written `$2a$31$` hash made every authentication
+attempt on that username burn hours of CPU on every replica. Anything the
+operator itself produced (cost 12) is untouched. A hash edited by hand outside
+the band is replaced, and the application must re-read its Secret.
+
+**The gateway pods now need a writable volume.** The operator mounts a
+disk-backed `emptyDir` at `/var/spool/mailout` for message bodies too large to
+keep in memory. Nothing to do — but if you deploy the dataplane yourself, note
+that it refuses to start when that path is not writable, rather than failing on
+the first large message. Set `limits.spoolDir` to a writable directory.
+
+**Authentication is now rate limited per connection**, and concurrent
+connections are capped at 64 per listener. A client that retries a wrong
+password more than three times on one connection gets `421` and is
+disconnected; a client legitimately opening more than 64 connections at once
+waits for a slot instead of being refused.
+
+
 ## To the metrics, HA and quotas release
 
 Nothing breaks, but three things change under you.

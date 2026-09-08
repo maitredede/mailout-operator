@@ -132,12 +132,36 @@ type Limits struct {
 	MaxRecipients   int      `json:"maxRecipients,omitempty"`
 	ReadTimeout     Duration `json:"readTimeout,omitempty"`
 	WriteTimeout    Duration `json:"writeTimeout,omitempty"`
+
+	// MaxConnections caps concurrent connections per listener.
+	//
+	// Without it nothing bounds how many messages are in flight, so the pod's
+	// memory is sized by whoever connects rather than by configuration — and
+	// go-smtp offers no limit of its own.
+	MaxConnections int `json:"maxConnections,omitempty"`
+
+	// SpoolDir is where a message too large to keep on the heap is written for
+	// the length of its transaction. Empty means the system temporary
+	// directory. The file is unlinked as soon as it is created, so nothing
+	// survives the transaction, let alone the process.
+	SpoolDir string `json:"spoolDir,omitempty"`
+
+	// SpoolThreshold is the size past which a message body moves from memory to
+	// that directory. Below it, staying on the heap is both simpler and faster;
+	// above it, the point is that a 25 MiB message must not cost 25 MiB of heap
+	// per connection.
+	SpoolThreshold int64 `json:"spoolThreshold,omitempty"`
 }
 
 // Default limits, applied by Config.applyDefaults.
 const (
 	defaultMaxMessageBytes = 25 * 1024 * 1024
 	defaultMaxRecipients   = 50
+	// A pod is sized for a number of connections, not for a number of clients.
+	// 64 in flight at 25 MiB each is what sizes the spool volume; on the heap it
+	// would be 1.6 GiB, which is exactly what the spool exists to prevent.
+	defaultMaxConnections  = 128
+	defaultSpoolThreshold  = 1024 * 1024
 	defaultReadTimeout     = 60 * time.Second
 	defaultWriteTimeout    = 60 * time.Second
 	defaultUpstreamTimeout = 60 * time.Second
@@ -269,6 +293,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Limits.WriteTimeout == 0 {
 		c.Limits.WriteTimeout = Duration(defaultWriteTimeout)
+	}
+	if c.Limits.MaxConnections == 0 {
+		c.Limits.MaxConnections = defaultMaxConnections
+	}
+	if c.Limits.SpoolThreshold == 0 {
+		c.Limits.SpoolThreshold = defaultSpoolThreshold
 	}
 	if c.Upstream.Timeout == 0 {
 		c.Upstream.Timeout = Duration(defaultUpstreamTimeout)

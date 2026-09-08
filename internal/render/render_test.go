@@ -261,7 +261,11 @@ func TestDeploymentMountsConfigCertificatesAndKeys(t *testing.T) {
 	mounted := map[string]bool{}
 	for _, m := range container.VolumeMounts {
 		mounted[m.MountPath] = true
-		if !m.ReadOnly {
+		// The spool is the one writable path, and deliberately so: the root
+		// filesystem is read-only and a message body too large for memory has
+		// to go somewhere. Everything else carries configuration or key
+		// material and must stay read-only.
+		if !m.ReadOnly && m.MountPath != SpoolDir {
 			t.Errorf("mount %s is writable", m.MountPath)
 		}
 	}
@@ -269,6 +273,7 @@ func TestDeploymentMountsConfigCertificatesAndKeys(t *testing.T) {
 		"/etc/mailout",
 		"/etc/mailout/tls/mail-tls",
 		"/etc/mailout/dkim/dkim-example",
+		SpoolDir,
 	} {
 		if !mounted[want] {
 			t.Errorf("%s is not mounted; got %v", want, mounted)
@@ -666,5 +671,41 @@ func TestRenderRateLimit(t *testing.T) {
 	}
 	if plain.RateLimit != nil {
 		t.Errorf("rateLimit = %+v, want nil", plain.RateLimit)
+	}
+}
+
+// The spool volume must be disk-backed. An emptyDir with medium Memory is
+// tmpfs: the body would move off the Go heap and straight into the pod's memory
+// limit, so the OOM the spool exists to prevent would come back unchanged.
+func TestSpoolVolumeIsDiskBackedAndBounded(t *testing.T) {
+	gw := testGateway()
+	cfg, err := GatewayConfig(Input{Gateway: gw})
+	if err != nil {
+		t.Fatalf("GatewayConfig: %v", err)
+	}
+	deploy := Deployment(gw, cfg, nil, "img")
+
+	var spool *corev1.Volume
+	for i := range deploy.Spec.Template.Spec.Volumes {
+		if deploy.Spec.Template.Spec.Volumes[i].Name == SpoolVolumeName {
+			spool = &deploy.Spec.Template.Spec.Volumes[i]
+		}
+	}
+	if spool == nil {
+		t.Fatal("no spool volume; the dataplane cannot buffer a large message on a read-only rootfs")
+	}
+	if spool.EmptyDir == nil {
+		t.Fatal("the spool is not an emptyDir")
+	}
+	if spool.EmptyDir.Medium == corev1.StorageMediumMemory {
+		t.Error("the spool is tmpfs, so it counts against the pod's memory limit")
+	}
+	if spool.EmptyDir.SizeLimit == nil {
+		t.Error("the spool has no sizeLimit, so a runaway fills the node's disk")
+	}
+	// And the rendered configuration must point the dataplane at it, or it
+	// writes to a read-only path and refuses to start.
+	if cfg.Limits.SpoolDir != SpoolDir {
+		t.Errorf("config spoolDir = %q, want %q", cfg.Limits.SpoolDir, SpoolDir)
 	}
 }

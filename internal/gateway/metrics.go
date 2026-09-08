@@ -75,6 +75,7 @@ type Metrics struct {
 	registry *prometheus.Registry
 
 	messages         *prometheus.CounterVec
+	messagesSpooled  *prometheus.CounterVec
 	messageBytes     *prometheus.CounterVec
 	authFailures     *prometheus.CounterVec
 	milterDecisions  *prometheus.CounterVec
@@ -96,6 +97,12 @@ func NewMetrics() *Metrics {
 			Name: "mailout_messages_total",
 			Help: "Messages handled, by account and outcome.",
 		}, []string{"account", "result"}),
+		messagesSpooled: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mailout_messages_spooled_total",
+			Help: "Messages whose body was too large to keep in memory and was written to the spool " +
+				"directory for the length of the transaction. A steady rate here is what tells you the " +
+				"spool volume is load-bearing rather than dormant.",
+		}, []string{"account"}),
 		messageBytes: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mailout_message_bytes_total",
 			Help: "Bytes relayed upstream, by account, as submitted after filtering and signing.",
@@ -143,7 +150,7 @@ func NewMetrics() *Metrics {
 		}),
 	}
 	reg.MustRegister(
-		m.messages, m.messageBytes, m.authFailures, m.milterDecisions, m.dkimSignatures,
+		m.messages, m.messagesSpooled, m.messageBytes, m.authFailures, m.milterDecisions, m.dkimSignatures,
 		m.rateLimit, m.upstreamDelivery, m.configReloads, m.accounts, m.accountsRejected,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
@@ -166,6 +173,13 @@ func (m *Metrics) messageHandled(account, result string) {
 		return
 	}
 	m.messages.WithLabelValues(account, result).Inc()
+}
+
+func (m *Metrics) messageSpooled(account string) {
+	if m == nil {
+		return
+	}
+	m.messagesSpooled.WithLabelValues(account).Inc()
 }
 
 func (m *Metrics) messageRelayed(account string, bytes int) {

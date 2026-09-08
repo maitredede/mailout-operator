@@ -3,7 +3,6 @@
 package gateway
 
 import (
-	"bytes"
 	"crypto"
 	"crypto/ed25519"
 	"crypto/rsa"
@@ -100,12 +99,21 @@ func (s *dkimSigner) sign(msg *Message, policy *senderPolicy) error {
 		Signer:     key.signer,
 		HeaderKeys: key.headerKeys,
 	}
-	var signed bytes.Buffer
-	if err := dkim.Sign(&signed, bytes.NewReader(msg.Data), opts); err != nil {
+	// dkim.Sign streams: it reads the message and writes the signed copy, so a
+	// spooled body is signed file to file and never lands on the heap.
+	source, err := msg.Body.Reader()
+	if err != nil {
+		s.metrics.dkimResult(key.domain, dkimFailed)
+		return err
+	}
+	signed := msg.Body.sibling()
+	if err := dkim.Sign(signed, source, opts); err != nil {
+		_ = signed.Close()
 		s.metrics.dkimResult(key.domain, dkimFailed)
 		return fmt.Errorf("sign for %s: %w", key.domain, err)
 	}
-	msg.Data = signed.Bytes()
+	_ = msg.Body.Close()
+	msg.Body = signed
 	s.metrics.dkimResult(key.domain, dkimSigned)
 	return nil
 }
@@ -117,7 +125,11 @@ func (s *dkimSigner) keyFor(msg *Message) *loadedDKIMKey {
 	if key := s.byDomain[domainOf(msg.From)]; key != nil {
 		return key
 	}
-	parsed, err := parseMessage(msg.Data)
+	header, _, err := msg.Body.headerBlock()
+	if err != nil {
+		return nil
+	}
+	parsed, err := parseMessage(header)
 	if err != nil {
 		return nil
 	}

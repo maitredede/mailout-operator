@@ -221,7 +221,16 @@ func (c *milterChain) runOne(ctx context.Context, f milterFilter, msg *Message, 
 		return err
 	}
 
-	parsed, err := parseMessage(msg.Data)
+	// The only stage that still materializes the whole body: the milter
+	// protocol hands headers and body to the filter and takes modifications
+	// back, and this chain applies them through parsedMessage. On a spooled
+	// message that undoes what the spool is for, which is why it is the next
+	// thing to stream.
+	data, err := msg.Body.Bytes()
+	if err != nil {
+		return err
+	}
+	parsed, err := parseMessage(data)
 	if err != nil {
 		return fmt.Errorf("parse message: %w", err)
 	}
@@ -287,7 +296,9 @@ func (c *milterChain) applyModifications(f milterFilter, msg *Message, parsed *p
 	if replaced {
 		parsed.Body = replacement
 	}
-	msg.Data = parsed.Bytes()
+	if err := msg.Body.Reset(parsed.Bytes()); err != nil {
+		return err
+	}
 	if len(msg.To) == 0 {
 		return &smtp.SMTPError{
 			Code:         554,

@@ -23,6 +23,11 @@ import (
 const (
 	// ConfigDir holds the rendered gateway configuration.
 	ConfigDir = "/etc/mailout"
+	// SpoolDir is where the dataplane writes a message body too large to keep
+	// in memory, for the length of its transaction. The container's root
+	// filesystem is read-only, so this must be a volume of its own or the
+	// gateway refuses to start.
+	SpoolDir = "/var/spool/mailout"
 	// ConfigFileName is the key of the rendered configuration, in its Secret
 	// and on disk.
 	ConfigFileName = "gateway.yaml"
@@ -108,6 +113,11 @@ func GatewayConfig(in Input) (*gateway.Config, error) {
 		TLS:       renderTLS(gw),
 		Upstream:  renderUpstream(gw.Spec.Upstream, in),
 		Milters:   renderMilters(gw.Spec.Milters),
+		// The operator mounts the volume, so it is the operator that says where
+		// the spool is. Nothing else about Limits is exposed: the defaults are
+		// the ones the pod is sized for, and one more knob is one more thing
+		// that can disagree with the Deployment it is rendered alongside.
+		Limits: gateway.Limits{SpoolDir: SpoolDir},
 	}
 	cfg.RateLimit = renderRateLimit(gw.Spec.RateLimit, in.RateLimitStore)
 	// An upstream that signs for us must be left to it: two signatures would

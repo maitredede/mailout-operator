@@ -318,6 +318,7 @@ func exposedMetricNames(t *testing.T) map[string]bool {
 	t.Helper()
 	m := NewMetrics()
 	m.messageRelayed("account", 1)
+	m.messageSpooled("account")
 	m.authFailed("account")
 	m.milterDecided("milter", decisionAccept)
 	m.dkimResult("example.test", dkimSigned)

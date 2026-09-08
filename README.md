@@ -46,9 +46,21 @@ Two custom resources:
 The decisions worth knowing about:
 
 - **Delivery is synchronous.** The gateway answers `250` only once the upstream
-  has accepted the message. There is no spool, so the pods are stateless, no
+  has accepted the message. There is no queue, so the pods are stateless, no
   message is lost to a restart, and a `4xx` from the upstream reaches the client
   as a `4xx` for it to retry.
+- **A large message is buffered on disk, not in memory.** Past 1 MiB the body
+  moves to a file for the length of its transaction — a buffer, not a queue:
+  it is unlinked the moment it is created, so it cannot outlive the transaction
+  and the pod stays stateless. Without it, each stage of the pipeline held a
+  full copy and a handful of parallel 25 MiB submissions were enough to have the
+  pod OOMKilled, which took the relay down for every tenant. The operator mounts
+  a disk-backed `emptyDir` for it; the container's root filesystem is read-only,
+  so the gateway refuses to start if that volume is missing.
+- **Concurrent connections are capped** (64 per listener by default). Nothing in
+  go-smtp bounds them, so without a cap the pod's memory and CPU are sized by
+  whoever connects rather than by configuration. Connections past the cap wait
+  for a slot.
 - **AUTH is only offered over TLS.** No credential crosses the wire in clear.
 - **SNI works on both ports**, 587 and 465, so one gateway can answer on several
   names with several certificates.
@@ -241,6 +253,7 @@ prometheus-operator's CRD is served by the cluster.
 |---|---|
 | `mailout_messages_total{account,result}` | `relayed`, `rejected` (5xx, permanent), `deferred` (4xx, retry expected), `discarded` (swallowed by a filter) |
 | `mailout_message_bytes_total{account}` | Volume relayed, after filtering and signing |
+| `mailout_messages_spooled_total{account}` | Bodies too large for memory, buffered on disk. Zero everywhere means the spool volume is dormant; a steady rate means losing it would turn large messages into `451`s |
 | `mailout_auth_failures_total{account}` | Refused logins; attempts on unknown usernames land under `<unknown>` |
 | `mailout_milter_decisions_total{milter,decision}` | `accept`, `reject`, `discard`, `unavailable` — the last one counted whether the message then went through or not |
 | `mailout_dkim_signatures_total{domain,result}` | `signed`, `refused` (the account may not send from that domain), `failed` |

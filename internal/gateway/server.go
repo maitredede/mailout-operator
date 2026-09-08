@@ -19,6 +19,7 @@ import (
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/net/netutil"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -27,6 +28,10 @@ import (
 // view even while a reload happens.
 type snapshot struct {
 	config *Config
+	// newSpool builds the buffer for one message. It is derived from the
+	// configuration, so a reload can change the threshold or the directory
+	// without touching a transaction already in flight.
+	newSpool func() *spool
 	// rejected lists the accounts left out of this snapshot and why. They are
 	// reported rather than fatal: one tenant's broken account must not stop the
 	// relay for everyone.
@@ -89,8 +94,18 @@ func newSnapshot(cfg *Config, log *slog.Logger, metrics *Metrics, prev *snapshot
 		log.Error("account not served", "account", account.Username, "reason", account.Reason)
 	}
 
+	// Probed on every reload rather than discovered on the first large message:
+	// the
+	// gateway's root filesystem is read-only, so a missing or unwritable spool
+	// directory is a real failure mode, and a configuration that cannot buffer
+	// a message must not be accepted as valid.
+	if err := probeSpool(cfg.Limits.SpoolDir); err != nil {
+		return nil, err
+	}
+
 	snap := &snapshot{
 		config:   cfg,
+		newSpool: newSpoolFactory(cfg.Limits),
 		rejected: rejected,
 		accounts: newAccountStore(served),
 		certs:    certs,
@@ -261,6 +276,12 @@ func (s *Server) Run(ctx context.Context) error {
 			closeAll()
 			return fmt.Errorf("listen %s (%s): %w", lc.Addr, lc.Name, err)
 		}
+		// Nothing else bounds how many messages are in flight: go-smtp has no
+		// connection limit, so without this the pod's memory and CPU are sized
+		// by whoever connects. Accepted connections beyond the limit wait for a
+		// slot rather than being refused, which is the behaviour a mail client
+		// handles best.
+		l = netutil.LimitListener(l, snap.config.Limits.MaxConnections)
 		listeners = append(listeners, l)
 		if lc.Mode == TLSModeImplicit {
 			l = tls.NewListener(l, s.tlsConfig())
@@ -453,8 +474,17 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 	return nil
 }
 
-// errSenderNotAllowed is a permanent refusal: the account is not configured for
-// this sender, and retrying will not change that.
+// errSpoolFailed is temporary: the relay could not buffer the message, which is
+// its own failure and not the client's. Refusing with a 4xx keeps the message
+// alive at the sender rather than losing it.
+func errSpoolFailed(err error) *smtp.SMTPError {
+	return &smtp.SMTPError{
+		Code:         451,
+		EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+		Message:      "Unable to buffer the message, try again later",
+	}
+}
+
 // errTooManyAuthFailures ends the conversation. 421 is the code that tells a
 // client the service is closing the channel, which is exactly what happens.
 func errTooManyAuthFailures() *smtp.SMTPError {
@@ -476,6 +506,8 @@ func errAuthBusy() *smtp.SMTPError {
 	}
 }
 
+// errSenderNotAllowed is a permanent refusal: the account is not configured for
+// this sender, and retrying will not change that.
 func errSenderNotAllowed(address string) *smtp.SMTPError {
 	return &smtp.SMTPError{
 		Code:         550,
@@ -511,15 +543,25 @@ func (s *session) Data(r io.Reader) error {
 		return err
 	}
 
-	data, err := io.ReadAll(r)
-	if err != nil {
+	// The Received header goes in first and the body is streamed after it, so
+	// the message is written once instead of being read whole and then copied
+	// to prepend a few hundred bytes.
+	body := s.snap.newSpool()
+	defer func() { _ = body.Close() }()
+	if _, err := body.Write(s.receivedHeader()); err != nil {
+		return errSpoolFailed(err)
+	}
+	if _, err := io.Copy(body, r); err != nil {
 		return err
+	}
+	if body.spooled() {
+		s.server.metrics.messageSpooled(s.account.Username)
 	}
 
 	msg := &Message{
 		From:    s.from,
 		To:      append([]string(nil), s.to...),
-		Data:    s.prependReceived(data),
+		Body:    body,
 		Account: s.account.Username,
 	}
 
@@ -529,7 +571,7 @@ func (s *session) Data(r io.Reader) error {
 	// envelope that passes while the header is forged still shows a forged
 	// sender, whether or not DMARC alignment catches it downstream.
 	if !policy.skipHeaderFromCheck && !policy.senders.empty() {
-		if err := checkHeaderFrom(msg.Data, policy.senders); err != nil {
+		if err := checkHeaderFrom(msg.Body, policy.senders); err != nil {
 			s.server.log.Warn("From header refused",
 				"account", s.account.Username, "envelope", msg.From, "remote", s.remoteAddr())
 			s.server.metrics.messageHandled(msg.Account, ResultRejected)
@@ -571,7 +613,7 @@ func (s *session) Data(r io.Reader) error {
 	// should finish rather than be cancelled by a shutdown. The relayer applies
 	// its own timeout, which is what bounds this call.
 	start := time.Now()
-	err = s.snap.relay.send(context.Background(), msg)
+	err := s.snap.relay.send(context.Background(), msg)
 	s.server.metrics.upstreamDelivered(time.Since(start))
 	if err != nil {
 		s.server.log.Warn("relay failed",
@@ -581,8 +623,8 @@ func (s *session) Data(r io.Reader) error {
 	}
 	s.server.log.Info("relayed",
 		"account", msg.Account, "from", msg.From, "rcpt", len(msg.To),
-		"bytes", len(msg.Data), "took", time.Since(start))
-	s.server.metrics.messageRelayed(msg.Account, len(msg.Data))
+		"bytes", msg.Body.Len(), "took", time.Since(start))
+	s.server.metrics.messageRelayed(msg.Account, int(msg.Body.Len()))
 	return nil
 }
 
@@ -608,8 +650,12 @@ func resultFor(err error, fallback string) string {
 // checkHeaderFrom applies the sender policy to the message's From header. A
 // message with no From header is left alone: that is a malformed message, not a
 // spoofing attempt, and the upstream is entitled to its own opinion on it.
-func checkHeaderFrom(data []byte, policy *senderPolicy) error {
-	parsed, err := parseMessage(data)
+func checkHeaderFrom(body *spool, policy *senderPolicy) error {
+	header, _, err := body.headerBlock()
+	if err != nil {
+		return errSpoolFailed(err)
+	}
+	parsed, err := parseMessage(header)
 	if err != nil {
 		// Unparsable here means unparsable for the upstream too; let it decide.
 		return nil
@@ -649,18 +695,18 @@ func (s *session) sessionInfo() sessionInfo {
 	return info
 }
 
-// prependReceived documents the hop, as any relay is expected to.
+// receivedHeader documents the hop, as any relay is expected to. It is written
+// ahead of the body rather than prepended to it.
 //
 // Every interpolated value is scrubbed of anything that could end a header or
 // the header block. A username that could is already refused by validUsername,
 // so this is belt and braces rather than the fix — but a header sink one
 // refactor away from an unchecked source is not a place to rely on a caller.
 // The EHLO name, in particular, is chosen freely by whoever connects.
-func (s *session) prependReceived(data []byte) []byte {
-	header := fmt.Sprintf("Received: from %s (%s)\r\n\tby %s (mailout) with ESMTPSA id %s;\r\n\t%s\r\n",
+func (s *session) receivedHeader() []byte {
+	return []byte(fmt.Sprintf("Received: from %s (%s)\r\n\tby %s (mailout) with ESMTPSA id %s;\r\n\t%s\r\n",
 		headerSafe(s.conn.Hostname()), headerSafe(s.remoteAddr()), headerSafe(s.snap.config.Hostname),
-		headerSafe(s.account.Username), time.Now().Format(time.RFC1123Z))
-	return append([]byte(header), data...)
+		headerSafe(s.account.Username), time.Now().Format(time.RFC1123Z)))
 }
 
 // headerSafeLimit keeps one interpolated value from pushing the Received header

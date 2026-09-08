@@ -54,6 +54,11 @@ func runGateway(ctx context.Context, configPath, metricsAddr string, log *slog.L
 	if err != nil {
 		return err
 	}
+	// Once, at startup. Unlinking a body as soon as it is created makes this
+	// unnecessary in every ordinary case; what is left is a container that
+	// restarted inside the same pod, where the emptyDir outlives the process.
+	gateway.SweepSpool(cfg.Limits.SpoolDir, log)
+
 	metrics := gateway.NewMetrics()
 	srv, err := gateway.NewServer(cfg, log, gateway.WithMetrics(metrics))
 	if err != nil {

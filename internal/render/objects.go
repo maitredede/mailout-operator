@@ -14,6 +14,7 @@ import (
 	monitoringv1 "github.com/maitredede/mailout-operator/internal/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -66,8 +67,15 @@ const (
 // ServiceMonitor.
 const (
 	MetricsPortName = "metrics"
-	MetricsPort     = int32(9090)
-	MetricsPath     = "/metrics"
+
+	// SpoolVolumeName is the writable volume holding message bodies in flight.
+	SpoolVolumeName = "spool"
+	// spoolSizeLimit backstops the emptyDir. maxConnections (64) times
+	// maxMessageBytes (25 MiB) is about 1.6 GiB of bodies in flight at the very
+	// worst, so this leaves headroom without pretending the volume is a queue.
+	spoolSizeLimit = "2Gi"
+	MetricsPort    = int32(9090)
+	MetricsPath    = "/metrics"
 )
 
 // MetricsServiceName is the Service carrying the Prometheus endpoint.
@@ -255,6 +263,24 @@ func Deployment(gw *v1alpha1.MailoutGateway, cfg *gateway.Config, accounts []Acc
 		},
 	}}
 	mounts := []corev1.VolumeMount{{Name: "config", MountPath: ConfigDir, ReadOnly: true}}
+
+	// The only writable path in the container. Disk-backed on purpose: an
+	// emptyDir with medium Memory is tmpfs, so it would count against the pod's
+	// memory limit and bring back exactly the OOM the spool exists to avoid.
+	//
+	// sizeLimit is a backstop, not the bound that matters: exceeding it makes
+	// the kubelet evict the pod, which is worse than refusing a message. What
+	// actually bounds the disk is maxConnections times maxMessageBytes, and the
+	// limit here leaves room above that.
+	volumes = append(volumes, corev1.Volume{
+		Name: SpoolVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				SizeLimit: ptr.To(resource.MustParse(spoolSizeLimit)),
+			},
+		},
+	})
+	mounts = append(mounts, corev1.VolumeMount{Name: SpoolVolumeName, MountPath: SpoolDir})
 
 	for i, secretName := range CertificateSecretNames(gw) {
 		name := fmt.Sprintf("tls-%d", i)

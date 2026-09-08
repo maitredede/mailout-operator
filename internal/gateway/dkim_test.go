@@ -53,13 +53,13 @@ func TestDKIMSignatureVerifies(t *testing.T) {
 			msg := signedMessage(t, []DKIMKey{key}, &Message{
 				From: "app@example.test",
 				To:   []string{"dest@elsewhere.test"},
-				Data: []byte("From: app@example.test\r\nSubject: signed\r\n\r\nbody\r\n"),
+				Body: bodyOf(t, []byte("From: app@example.test\r\nSubject: signed\r\n\r\nbody\r\n")),
 			}, "*@example.test")
 
-			if !strings.Contains(string(msg.Data), "DKIM-Signature:") {
-				t.Fatalf("no signature added:\n%s", msg.Data)
+			if !strings.Contains(string(bytesOf(t, msg)), "DKIM-Signature:") {
+				t.Fatalf("no signature added:\n%s", bytesOf(t, msg))
 			}
-			verifications, err := dkim.VerifyWithOptions(bytes.NewReader(msg.Data),
+			verifications, err := dkim.VerifyWithOptions(bytes.NewReader(bytesOf(t, msg)),
 				&dkim.VerifyOptions{LookupTXT: lookup})
 			if err != nil {
 				t.Fatalf("VerifyWithOptions: %v", err)
@@ -83,10 +83,10 @@ func TestDKIMLeavesUnknownDomainUnsigned(t *testing.T) {
 	key, _ := dkimTestKey(t, "rsa", "example.test", "mail")
 	msg := signedMessage(t, []DKIMKey{key}, &Message{
 		From: "app@other.test",
-		Data: []byte("From: app@other.test\r\nSubject: hi\r\n\r\nbody\r\n"),
+		Body: bodyOf(t, []byte("From: app@other.test\r\nSubject: hi\r\n\r\nbody\r\n")),
 	}, "*@other.test")
-	if strings.Contains(string(msg.Data), "DKIM-Signature:") {
-		t.Fatalf("message was signed under the wrong domain:\n%s", msg.Data)
+	if strings.Contains(string(bytesOf(t, msg)), "DKIM-Signature:") {
+		t.Fatalf("message was signed under the wrong domain:\n%s", bytesOf(t, msg))
 	}
 }
 
@@ -96,9 +96,9 @@ func TestDKIMFallsBackToFromHeader(t *testing.T) {
 	key, lookup := dkimTestKey(t, "rsa", "example.test", "mail")
 	msg := signedMessage(t, []DKIMKey{key}, &Message{
 		From: "",
-		Data: []byte("From: Application <app@example.test>\r\nSubject: hi\r\n\r\nbody\r\n"),
+		Body: bodyOf(t, []byte("From: Application <app@example.test>\r\nSubject: hi\r\n\r\nbody\r\n")),
 	}, "*@example.test")
-	verifications, err := dkim.VerifyWithOptions(bytes.NewReader(msg.Data),
+	verifications, err := dkim.VerifyWithOptions(bytes.NewReader(bytesOf(t, msg)),
 		&dkim.VerifyOptions{LookupTXT: lookup})
 	if err != nil || len(verifications) != 1 || verifications[0].Err != nil {
 		t.Fatalf("signature missing or invalid: %v %+v", err, verifications)
@@ -150,13 +150,13 @@ func TestDKIMRefusesToSignAnUnauthorizedDomain(t *testing.T) {
 	msg := signedMessage(t, []DKIMKey{key}, &Message{
 		From:    "attacker@victim.test",
 		Account: "tenant-a.app",
-		Data:    []byte("From: attacker@victim.test\r\nSubject: spoofed\r\n\r\nbody\r\n"),
+		Body:    bodyOf(t, []byte("From: attacker@victim.test\r\nSubject: spoofed\r\n\r\nbody\r\n")),
 	}, "*@attacker.test") // allowed on its own domain only
 
-	if strings.Contains(string(msg.Data), "DKIM-Signature:") {
-		t.Fatalf("signed a domain the account may not send from:\n%s", msg.Data)
+	if strings.Contains(string(bytesOf(t, msg)), "DKIM-Signature:") {
+		t.Fatalf("signed a domain the account may not send from:\n%s", bytesOf(t, msg))
 	}
-	verifications, err := dkim.VerifyWithOptions(bytes.NewReader(msg.Data),
+	verifications, err := dkim.VerifyWithOptions(bytes.NewReader(bytesOf(t, msg)),
 		&dkim.VerifyOptions{LookupTXT: lookup})
 	if err == nil && len(verifications) > 0 {
 		t.Fatalf("a signature was produced for victim.test: %+v", verifications)
@@ -169,9 +169,9 @@ func TestDKIMSignsNothingWithoutADeclaredSender(t *testing.T) {
 	key, _ := dkimTestKey(t, "rsa", "example.test", "mail")
 	msg := signedMessage(t, []DKIMKey{key}, &Message{
 		From: "app@example.test",
-		Data: []byte("From: app@example.test\r\nSubject: hi\r\n\r\nbody\r\n"),
+		Body: bodyOf(t, []byte("From: app@example.test\r\nSubject: hi\r\n\r\nbody\r\n")),
 	})
-	if strings.Contains(string(msg.Data), "DKIM-Signature:") {
-		t.Fatalf("an account with no allowedSenders got its mail signed:\n%s", msg.Data)
+	if strings.Contains(string(bytesOf(t, msg)), "DKIM-Signature:") {
+		t.Fatalf("an account with no allowedSenders got its mail signed:\n%s", bytesOf(t, msg))
 	}
 }

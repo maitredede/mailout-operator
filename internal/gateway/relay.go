@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 
@@ -15,19 +16,27 @@ import (
 	"github.com/emersion/go-smtp"
 )
 
-// Message is one submission, buffered in memory until it has been relayed.
+// Message is one submission being relayed. The body lives in a spool, which
+// keeps it on the heap while it is small and moves it to a file when it is not
+// — so the pod's memory is sized by configuration rather than by what a client
+// chooses to send.
 type Message struct {
 	From string
 	To   []string
-	Data []byte
+	Body *spool
 	// Account is the authenticated sender.
 	Account string
 }
 
 // relayer delivers messages to the upstream SMTP server. Delivery is
 // synchronous: the gateway only answers 250 to its client once the upstream
-// has accepted the message. There is no spool, so the pod stays stateless and
-// no message can be lost by a restart — retrying is the client's job.
+// has accepted the message.
+//
+// There is no queue, so the pod stays stateless and no message can be lost by a
+// restart — retrying is the client's job. A large body does get written to disk
+// for the length of its transaction (see spool), which is a buffer and not a
+// queue: nothing is stored and forwarded, and the file cannot outlive the
+// transaction, let alone the process.
 type relayer struct {
 	upstream Upstream
 	// heloName is announced to the upstream.
@@ -87,7 +96,14 @@ func (r *relayer) send(ctx context.Context, msg *Message) error {
 	if err != nil {
 		return r.wrapUpstream("DATA", err)
 	}
-	if _, err := w.Write(msg.Data); err != nil {
+	body, err := msg.Body.Reader()
+	if err != nil {
+		w.Close()
+		return err
+	}
+	// Streamed, not written in one go: on a spooled body this is the difference
+	// between a constant-size copy buffer and a second full copy on the heap.
+	if _, err := io.Copy(w, body); err != nil {
 		w.Close()
 		return r.wrapUpstream("DATA write", err)
 	}
