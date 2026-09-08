@@ -5,6 +5,7 @@ package render
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -707,5 +708,78 @@ func TestSpoolVolumeIsDiskBackedAndBounded(t *testing.T) {
 	// writes to a read-only path and refuses to start.
 	if cfg.Limits.SpoolDir != SpoolDir {
 		t.Errorf("config spoolDir = %q, want %q", cfg.Limits.SpoolDir, SpoolDir)
+	}
+}
+
+// A Secret over 1 MiB is refused by the API server, which fails the whole
+// reconciliation — while the previous configuration stays in service. The relay
+// keeps running, nothing looks broken, and no change applies again: no new
+// account, no rotated password, no way to disable anyone. So the budget is
+// enforced before the write, and the accounts inflating it are the ones dropped.
+func TestFitAccountsDropsTheLargestFirst(t *testing.T) {
+	fat := func(username string, senders int) gateway.Account {
+		account := gateway.Account{Username: username, PasswordHash: "hash"}
+		for i := range senders {
+			account.AllowedSenders = append(account.AllowedSenders,
+				fmt.Sprintf("%s%d@%s.example.test", strings.Repeat("a", 200), i, username))
+		}
+		return account
+	}
+	cfg := &gateway.Config{Accounts: []gateway.Account{
+		{Username: "small-1", PasswordHash: "hash"},
+		fat("greedy", 32),
+		{Username: "small-2", PasswordHash: "hash"},
+		fat("hungry", 32),
+	}}
+
+	// A budget that fits the two small accounts and neither fat one.
+	dropped := FitAccounts(cfg, 2048)
+
+	if len(dropped) != 2 {
+		t.Fatalf("dropped = %v, want the two large accounts", dropped)
+	}
+	kept := map[string]bool{}
+	for _, account := range cfg.Accounts {
+		kept[account.Username] = true
+	}
+	for _, want := range []string{"small-1", "small-2"} {
+		if !kept[want] {
+			t.Errorf("%s was dropped; a modest account must not lose its service to a greedy one", want)
+		}
+	}
+	for _, gone := range []string{"greedy", "hungry"} {
+		if kept[gone] {
+			t.Errorf("%s survived, so the budget was not enforced", gone)
+		}
+	}
+}
+
+// Nothing to do is the common case, and it must not touch the configuration.
+func TestFitAccountsLeavesAFittingConfigAlone(t *testing.T) {
+	cfg := &gateway.Config{Accounts: []gateway.Account{
+		{Username: "a", PasswordHash: "hash"},
+		{Username: "b", PasswordHash: "hash"},
+	}}
+	if dropped := FitAccounts(cfg, ConfigBudget); dropped != nil {
+		t.Errorf("dropped %v from a configuration well under budget", dropped)
+	}
+	if len(cfg.Accounts) != 2 {
+		t.Errorf("accounts = %d, want 2 untouched", len(cfg.Accounts))
+	}
+}
+
+// If it does not fit with no accounts at all, the accounts are not the problem:
+// dropping every one of them would take the relay down for everybody to fix
+// something else entirely.
+func TestFitAccountsGivesUpWhenTheAccountsAreNotTheProblem(t *testing.T) {
+	cfg := &gateway.Config{
+		Hostname: strings.Repeat("h", 4096),
+		Accounts: []gateway.Account{{Username: "a", PasswordHash: "hash"}},
+	}
+	if dropped := FitAccounts(cfg, 512); dropped != nil {
+		t.Errorf("dropped %v, but the accounts are not what exceeds the budget", dropped)
+	}
+	if len(cfg.Accounts) != 1 {
+		t.Errorf("accounts = %d, want the account kept", len(cfg.Accounts))
 	}
 }

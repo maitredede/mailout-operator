@@ -9,6 +9,7 @@ package render
 import (
 	"fmt"
 	"path/filepath"
+	"sigs.k8s.io/yaml"
 	"sort"
 	"strings"
 
@@ -367,4 +368,90 @@ func ListenerStatuses(cfg *gateway.Config) []v1alpha1.ListenerStatus {
 		})
 	}
 	return out
+}
+
+// ConfigBudget is how large the rendered configuration may be.
+//
+// A Kubernetes Secret caps its data at 1 MiB, and a Secret that cannot be
+// written stops the whole reconciliation — while the previous one stays in
+// service. The relay keeps running on it, so nothing looks broken, but no
+// change ever applies again: no new account, no rotated password, and no way to
+// disable anyone. Losing revocation quietly is worse than serving fewer
+// accounts loudly, which is why this is enforced before the write rather than
+// discovered as an API error after it.
+//
+// The margin below 1 MiB covers the rest of the Secret: keys, labels and the
+// base64 the API server stores it in.
+const ConfigBudget = 700 * 1024
+
+// FitAccounts drops accounts until the configuration fits the budget, largest
+// first, and returns what it dropped.
+//
+// Largest first is the point: the account inflating the configuration is the
+// one that loses its service, not whichever happens to sort last. Everyone else
+// keeps being served, which is the same rule the dataplane already applies to
+// an account whose own settings are unusable.
+func FitAccounts(cfg *gateway.Config, budget int) []string {
+	if size, err := marshalledSize(cfg); err != nil || size <= budget {
+		return nil
+	}
+
+	// Ordered by their own contribution, so dropping walks from the most
+	// expensive down.
+	type sized struct {
+		index int
+		size  int
+	}
+	order := make([]sized, 0, len(cfg.Accounts))
+	for i := range cfg.Accounts {
+		size, err := marshalledSize(cfg.Accounts[i])
+		if err != nil {
+			return nil
+		}
+		order = append(order, sized{index: i, size: size})
+	}
+	sort.Slice(order, func(i, j int) bool {
+		if order[i].size != order[j].size {
+			return order[i].size > order[j].size
+		}
+		// A stable tie-break, so two identical accounts do not swap between
+		// reconciliations and produce a Secret that never settles.
+		return cfg.Accounts[order[i].index].Username < cfg.Accounts[order[j].index].Username
+	})
+
+	dropped := map[int]bool{}
+	var names []string
+	for _, candidate := range order {
+		dropped[candidate.index] = true
+		names = append(names, cfg.Accounts[candidate.index].Username)
+
+		kept := make([]gateway.Account, 0, len(cfg.Accounts))
+		for i := range cfg.Accounts {
+			if !dropped[i] {
+				kept = append(kept, cfg.Accounts[i])
+			}
+		}
+		probe := *cfg
+		probe.Accounts = kept
+		size, err := marshalledSize(&probe)
+		if err != nil {
+			return nil
+		}
+		if size <= budget {
+			cfg.Accounts = kept
+			return names
+		}
+	}
+	// Even with no account at all the configuration does not fit, so the
+	// problem is not the accounts. Leave it alone and let the write fail with
+	// the API server's own message, which will name the real cause.
+	return nil
+}
+
+func marshalledSize(v any) (int, error) {
+	out, err := yaml.Marshal(v)
+	if err != nil {
+		return 0, err
+	}
+	return len(out), nil
 }

@@ -72,8 +72,17 @@ spec:
                   a signature vouches for a domain, and an account must not be able to
                   vouch for a domain it may not send from. This is also what stops one
                   tenant from having another tenant's domain signed.
+
+                  Bounded because every entry is rendered into the gateway's shared
+                  configuration Secret, which a Kubernetes Secret caps at 1 MiB. Without a
+                  bound, one account with a few hundred kilobytes of senders made that
+                  Secret unwritable — and since the previous one stays in service, the
+                  gateway kept running while no change ever applied again: no new account,
+                  no rotated password, and no way to disable anyone.
                 items:
+                  maxLength: 256
                   type: string
+                maxItems: 32
                 type: array
               disabled:
                 description: Disabled keeps the account and its Secret but refuses
@@ -116,9 +125,13 @@ spec:
                   disable:
                     description: |-
                       Disable names gateway filters to skip for this account, by their
-                      spec.milters[].name.
+                      spec.milters[].name. A filter name is a DNS label, and there cannot be
+                      more of them than the gateway declares — the bounds are there so this
+                      field cannot be used to inflate the shared configuration Secret.
                     items:
+                      maxLength: 63
                       type: string
+                    maxItems: 32
                     type: array
                 type: object
               rotation:

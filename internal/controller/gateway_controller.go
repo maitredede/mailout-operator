@@ -293,6 +293,16 @@ func (r *GatewayReconciler) reconcileCertificate(ctx context.Context, gw *v1alph
 }
 
 func (r *GatewayReconciler) reconcileConfigSecret(ctx context.Context, gw *v1alpha1.MailoutGateway, cfg *gateway.Config) error {
+	log := logf.FromContext(ctx)
+	// Enforced before the write, not discovered after it: a Secret over 1 MiB
+	// is refused by the API server, which fails the whole reconciliation while
+	// the previous configuration stays in service — so the relay keeps running
+	// and no change ever applies again, revocation included.
+	if dropped := render.FitAccounts(cfg, render.ConfigBudget); len(dropped) > 0 {
+		log.Error(nil, "configuration too large, accounts dropped largest first",
+			"gateway", gw.Name, "dropped", dropped, "budget", render.ConfigBudget)
+	}
+
 	rendered, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal configuration: %w", err)

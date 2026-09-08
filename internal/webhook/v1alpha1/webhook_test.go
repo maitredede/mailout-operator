@@ -5,6 +5,7 @@
 package v1alpha1
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -474,6 +475,51 @@ func TestAccountUsernameRejectsControlCharacters(t *testing.T) {
 // namespace and an object name that are each legal produce a username that is
 // silently dropped from the served configuration — an account that reports
 // nothing wrong and never works.
+// Every allowedSenders entry is rendered into the gateway's shared
+// configuration Secret, which the API server caps at 1 MiB. Unbounded, one
+// account made that Secret unwritable — and since the previous one stays in
+// service, the relay kept running while no change ever applied again, so the
+// admin lost the ability to disable anyone.
+func TestAccountAllowedSendersAreBounded(t *testing.T) {
+	if err := createGateway(t, validGateway("bounded")); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	ns := newNamespace(t, "tenant")
+
+	makeAccount := func(name string, senders []string) *v1alpha1.MailoutAccount {
+		return &v1alpha1.MailoutAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: v1alpha1.MailoutAccountSpec{
+				GatewayRef:     v1alpha1.GatewayReference{Name: "bounded"},
+				SecretRef:      v1alpha1.LocalObjectReference{Name: name + "-smtp"},
+				AllowedSenders: senders,
+			},
+		}
+	}
+
+	// One entry of 700 KB: valid in form (one @, no wildcard), so only a length
+	// bound stops it.
+	huge := strings.Repeat("a", 700*1024) + "@attacker.test"
+	if err := testClient.Create(t.Context(), makeAccount("one-huge", []string{huge})); err == nil {
+		t.Error("a 700 KB sender entry was admitted")
+	}
+
+	// Or many entries, each individually plausible.
+	many := make([]string, 0, 64)
+	for i := range 64 {
+		many = append(many, fmt.Sprintf("app%d@attacker.test", i))
+	}
+	if err := testClient.Create(t.Context(), makeAccount("too-many", many)); err == nil {
+		t.Error("64 sender entries were admitted past the 32 item bound")
+	}
+
+	// And what a real account declares still works.
+	if err := testClient.Create(t.Context(), makeAccount("reasonable",
+		[]string{"*@example.test", "app@other.test"})); err != nil {
+		t.Errorf("a reasonable account was refused: %v", err)
+	}
+}
+
 func TestAccountRejectedWhenTheDefaultUsernameIsTooLong(t *testing.T) {
 	if err := createGateway(t, validGateway("longdefault")); err != nil {
 		t.Fatalf("create gateway: %v", err)

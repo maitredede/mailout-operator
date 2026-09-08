@@ -20,7 +20,11 @@ type GatewayReference struct {
 // route its mail through a filter of its choosing.
 type AccountMiltersSpec struct {
 	// Disable names gateway filters to skip for this account, by their
-	// spec.milters[].name.
+	// spec.milters[].name. A filter name is a DNS label, and there cannot be
+	// more of them than the gateway declares — the bounds are there so this
+	// field cannot be used to inflate the shared configuration Secret.
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=63
 	// +optional
 	Disable []string `json:"disable,omitempty"`
 }
@@ -65,6 +69,15 @@ type MailoutAccountSpec struct {
 	// a signature vouches for a domain, and an account must not be able to
 	// vouch for a domain it may not send from. This is also what stops one
 	// tenant from having another tenant's domain signed.
+	//
+	// Bounded because every entry is rendered into the gateway's shared
+	// configuration Secret, which a Kubernetes Secret caps at 1 MiB. Without a
+	// bound, one account with a few hundred kilobytes of senders made that
+	// Secret unwritable — and since the previous one stays in service, the
+	// gateway kept running while no change ever applied again: no new account,
+	// no rotated password, and no way to disable anyone.
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=256
 	// +optional
 	AllowedSenders []string `json:"allowedSenders,omitempty"`
 
