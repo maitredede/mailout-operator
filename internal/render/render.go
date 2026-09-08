@@ -78,7 +78,8 @@ type Input struct {
 	// RateLimitStore holds what the operator read from the quota store's
 	// Secrets. Credentials are resolved by the operator and embedded in the
 	// rendered configuration, like the upstream's: the gateway pod holds no API
-	// permission of its own.
+	// permission of its own, and no ServiceAccount token is mounted into it
+	// either — see Deployment.
 	RateLimitStore RateLimitCredentials
 }
 

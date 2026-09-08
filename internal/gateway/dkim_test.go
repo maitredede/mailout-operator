@@ -4,6 +4,10 @@ package gateway
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"strings"
 	"testing"
@@ -174,4 +178,50 @@ func TestDKIMSignsNothingWithoutADeclaredSender(t *testing.T) {
 	if strings.Contains(string(bytesOf(t, msg)), "DKIM-Signature:") {
 		t.Fatalf("an account with no allowedSenders got its mail signed:\n%s", bytesOf(t, msg))
 	}
+}
+
+// RFC 8301 deprecates 1024-bit RSA for DKIM. A factored key does not merely
+// weaken a signature: it lets whoever factored it mint mail that is DKIM-valid
+// and DMARC-aligned for the domain. This used to load and sign without a word,
+// and the PKCS#1 branch returned the key without looking at it at all.
+func TestWeakRSAKeyIsRefused(t *testing.T) {
+	for name, bits := range map[string]int{"1024 bits": 1024, "2048 bits": 2048} {
+		t.Run(name, func(t *testing.T) {
+			key, err := rsa.GenerateKey(rand.Reader, bits)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			for encoding, pemBytes := range map[string][]byte{
+				"PKCS#8": pkcs8PEM(t, key),
+				"PKCS#1": pkcs1PEM(t, key),
+			} {
+				t.Run(encoding, func(t *testing.T) {
+					_, err := loadDKIMPrivateKey(DKIMKey{PrivateKeyPEM: string(pemBytes)})
+					switch {
+					case bits < minRSABits && err == nil:
+						t.Errorf("a %d bit key was accepted", bits)
+					case bits >= minRSABits && err != nil:
+						t.Errorf("a %d bit key was refused: %v", bits, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func pkcs8PEM(t *testing.T, key *rsa.PrivateKey) []byte {
+	t.Helper()
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal PKCS#8: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+}
+
+func pkcs1PEM(t *testing.T, key *rsa.PrivateKey) []byte {
+	t.Helper()
+	return pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
 }

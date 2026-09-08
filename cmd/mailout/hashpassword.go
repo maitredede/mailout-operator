@@ -31,6 +31,13 @@ func newHashPasswordCommand() *cobra.Command {
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "password: %s\n", password)
 			case len(args) == 1:
+				// Visible in /proc/<pid>/cmdline to anything running as the
+				// same user, and in the shell's history afterwards. Kept
+				// because it is convenient and sometimes it is a throwaway
+				// password, but not silently.
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					"warning: a password on the command line is visible in /proc and in your shell "+
+						"history. Pipe it on stdin instead: echo -n 'secret' | mailout hash-password")
 				password = args[0]
 			default:
 				line, err := bufio.NewReader(os.Stdin).ReadString('\n')

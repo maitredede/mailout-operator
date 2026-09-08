@@ -58,6 +58,17 @@ func newRelayer(cfg *Config, log *slog.Logger) (*relayer, error) {
 		}
 		tlsCfg.RootCAs = pool
 	}
+	// The CRD webhook warns about this too, but a rendered configuration is not
+	// the only way to reach the dataplane: the standalone file is a supported
+	// entry point, and there the choice would otherwise be silent.
+	if cfg.Upstream.Username != "" && cfg.Upstream.TLS == TLSModeNone {
+		log.Warn("upstream credentials will be sent in clear: upstream.tls is none",
+			"host", cfg.Upstream.Host)
+	}
+	if cfg.Upstream.InsecureSkipVerify {
+		log.Warn("upstream certificate verification is disabled",
+			"host", cfg.Upstream.Host)
+	}
 	return &relayer{upstream: cfg.Upstream, heloName: cfg.Hostname, tlsCfg: tlsCfg, log: log}, nil
 }
 

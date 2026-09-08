@@ -158,6 +158,13 @@ func newLimiter(cfg *Config, log *slog.Logger, metrics *Metrics) (*limiter, erro
 	// The mode is deduced from the options rather than declared, so a
 	// misconfiguration — three replicas listed without a masterName, taken for a
 	// cluster — is otherwise silent until the first message is refused.
+	if store.Password != "" && !store.TLS {
+		l.log.Warn("quota store password will be sent in clear: rateLimit.store.tls is false",
+			"mode", storeMode(store))
+	}
+	if store.InsecureSkipVerify {
+		l.log.Warn("quota store certificate verification is disabled")
+	}
 	l.log.Info("rate limiting enabled",
 		"mode", storeMode(store), "addresses", len(store.Addresses),
 		"messagesPerMinute", l.limits.MessagesPerMinute,

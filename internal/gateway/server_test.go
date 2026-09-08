@@ -53,6 +53,10 @@ func newFakeUpstream(t *testing.T) *fakeUpstream {
 		return &fakeUpstreamSession{up: up}, nil
 	}))
 	srv.Domain = "upstream.test"
+	// A real upstream accepts far more than go-smtp's 2000 byte default; the
+	// fake one must not be the thing that refuses a long line, or a test about
+	// the gateway's own limit would measure this instead.
+	srv.MaxLineLength = 1 << 20
 	srv.AllowInsecureAuth = true
 	up.addr = l.Addr().String()
 	go func() { _ = srv.Serve(l) }()

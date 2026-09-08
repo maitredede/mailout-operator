@@ -1,0 +1,20 @@
+# The build context is copied wholesale into the build stage's layers. The final
+# distroless image carries only the binary, so nothing here ships today — but a
+# registry cache export (--cache-to type=registry) publishes those layers, and
+# deploy/compose/certs holds real private keys on any machine that ran
+# `make compose-certs`.
+.git
+.gitignore
+.remember
+bin
+dist
+
+# Throwaway keys and certificates for the local compose stack.
+deploy/compose/certs
+*.key
+*.pem
+*.crt
+
+# Tests never run inside the image.
+test
+docs

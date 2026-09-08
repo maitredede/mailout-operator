@@ -133,6 +133,15 @@ type Limits struct {
 	ReadTimeout     Duration `json:"readTimeout,omitempty"`
 	WriteTimeout    Duration `json:"writeTimeout,omitempty"`
 
+	// MaxLineLength caps one line of a command or of message data.
+	//
+	// go-smtp defaults to 2000 and applies it during DATA too, so any body line
+	// longer than that makes the message undeliverable — and plenty of real
+	// senders emit long lines: unwrapped HTML, a long References header. RFC
+	// 5321 §4.5.3.1.6 only requires 1000 to be accepted, so this is a ceiling
+	// rather than a promise.
+	MaxLineLength int `json:"maxLineLength,omitempty"`
+
 	// MaxConnections caps concurrent connections per listener.
 	//
 	// Without it nothing bounds how many messages are in flight, so the pod's
@@ -160,7 +169,10 @@ const (
 	// A pod is sized for a number of connections, not for a number of clients.
 	// 64 in flight at 25 MiB each is what sizes the spool volume; on the heap it
 	// would be 1.6 GiB, which is exactly what the spool exists to prevent.
-	defaultMaxConnections  = 128
+	defaultMaxConnections = 64
+	// Generous next to the 2000 go-smtp defaults to, because the failure mode
+	// is a message thrown away rather than anything saved.
+	defaultMaxLineLength   = 8000
 	defaultSpoolThreshold  = 1024 * 1024
 	defaultReadTimeout     = 60 * time.Second
 	defaultWriteTimeout    = 60 * time.Second
@@ -297,6 +309,9 @@ func (c *Config) applyDefaults() {
 	if c.Limits.MaxConnections == 0 {
 		c.Limits.MaxConnections = defaultMaxConnections
 	}
+	if c.Limits.MaxLineLength == 0 {
+		c.Limits.MaxLineLength = defaultMaxLineLength
+	}
 	if c.Limits.SpoolThreshold == 0 {
 		c.Limits.SpoolThreshold = defaultSpoolThreshold
 	}
@@ -375,6 +390,14 @@ func (c *Config) Validate() error {
 		// The relay fails closed on a store it cannot reach, so publishing a
 		// quota with nowhere to count would stop mail rather than cap it.
 		errs = append(errs, "rateLimit.store.addresses is required")
+	}
+	if c.RateLimit != nil && c.RateLimit.Store.InsecureSkipVerify && !c.RateLimit.Store.TLS {
+		// The TLS configuration is only built when tls is on, so this field
+		// was silently ignored — and someone who wrote it believed the
+		// connection was encrypted, when it was carrying the store's password
+		// in clear.
+		errs = append(errs, "rateLimit.store.insecureSkipVerify requires tls: true; "+
+			"without TLS the connection carries the store password in clear")
 	}
 	for i, m := range c.Milters {
 		if _, _, err := m.ParseAddress(); err != nil {

@@ -340,6 +340,9 @@ func (s *Server) newSMTPServer(lc Listener) *smtp.Server {
 		return &session{server: s, conn: c, snap: s.snapshot()}, nil
 	}))
 	srv.Domain = snap.config.Hostname
+	// Applied during DATA as well as to commands, so the default of 2000 makes
+	// any long body line an undeliverable message.
+	srv.MaxLineLength = snap.config.Limits.MaxLineLength
 	srv.MaxMessageBytes = snap.config.Limits.MaxMessageBytes
 	srv.MaxRecipients = snap.config.Limits.MaxRecipients
 	srv.ReadTimeout = snap.config.Limits.ReadTimeout.D()

@@ -783,3 +783,24 @@ func TestFitAccountsGivesUpWhenTheAccountsAreNotTheProblem(t *testing.T) {
 		t.Errorf("accounts = %d, want the account kept", len(cfg.Accounts))
 	}
 }
+
+// The dataplane reads a file and never calls the API, so mounting a token into
+// the process that terminates untrusted SMTP hands out a cluster identity for
+// nothing. Worse, a RoleBinding added later to the namespace's default account
+// would silently become the relay's.
+func TestGatewayPodMountsNoServiceAccountToken(t *testing.T) {
+	gw := testGateway()
+	cfg, err := GatewayConfig(Input{Gateway: gw})
+	if err != nil {
+		t.Fatalf("GatewayConfig: %v", err)
+	}
+	spec := Deployment(gw, cfg, nil, "img").Spec.Template.Spec
+
+	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+		t.Error("the gateway pod mounts a ServiceAccount token")
+	}
+	if spec.ServiceAccountName != "" {
+		t.Errorf("the gateway pod names a ServiceAccount (%q); it needs none",
+			spec.ServiceAccountName)
+	}
+}

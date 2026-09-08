@@ -263,3 +263,23 @@ func readGreeting(c net.Conn) (string, error) {
 	line, err := bufio.NewReader(c).ReadString('\n')
 	return line, err
 }
+
+// go-smtp's default line limit of 2000 applies during DATA too, so any long
+// body line made a message undeliverable — unwrapped HTML or a long References
+// header is enough. Found by accident while writing the spool test above.
+func TestLongBodyLineIsRelayed(t *testing.T) {
+	gw := newTestGateway(t)
+	c := gw.dialSubmission(t)
+	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
+		t.Fatalf("AUTH: %v", err)
+	}
+
+	// Longer than go-smtp's default, shorter than ours.
+	body := "Subject: long\r\n\r\n" + strings.Repeat("x", 4000) + "\r\n"
+	if err := c.SendMail("app@example.test", []string{"dest@example.test"}, strings.NewReader(body)); err != nil {
+		t.Fatalf("a 4000 byte body line was refused: %v", err)
+	}
+	if received := gw.upstream.received(); len(received) != 1 {
+		t.Fatalf("upstream received %d messages, want 1", len(received))
+	}
+}

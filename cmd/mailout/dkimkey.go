@@ -27,11 +27,17 @@ func newDKIMKeyCommand() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			if outFile != "" {
-				if err := os.WriteFile(outFile, []byte(key.PrivateKeyPEM), 0o600); err != nil {
-					return fmt.Errorf("write %s: %w", outFile, err)
+				if err := writePrivateKey(outFile, key.PrivateKeyPEM); err != nil {
+					return err
 				}
-				fmt.Fprintf(out, "private key written to %s\n", outFile)
+				fmt.Fprintf(out, "private key written to %s (mode 0600)\n", outFile)
 			} else {
+				// A signing key lives for years; a terminal's scrollback, a
+				// `tee`, or a CI log lives longer. Say so rather than assume
+				// the caller meant it.
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					"warning: writing the private key to stdout. Use -o to write it to a file "+
+						"with restrictive permissions instead.")
 				fmt.Fprint(out, key.PrivateKeyPEM)
 			}
 			fmt.Fprintf(out, "\nPublish this TXT record:\n%s\n  %s\n",
@@ -45,4 +51,26 @@ func newDKIMKeyCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&outFile, "out", "o", "", "write the private key here instead of stdout")
 	_ = cmd.MarkFlagRequired("domain")
 	return cmd
+}
+
+// writePrivateKey writes the key with an explicit mode.
+//
+// os.WriteFile applies its mode only when it *creates* the file, so rotating a
+// key into an existing path kept whatever mode was there — and this project's
+// own gen-certs.sh leaves keys at 0644, so regenerating through that path left
+// a world-readable signing key. Chmod after opening is what makes the mode
+// true in both cases.
+func writePrivateKey(path, pemData string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return fmt.Errorf("restrict %s: %w", path, err)
+	}
+	if _, err := f.WriteString(pemData); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return f.Close()
 }

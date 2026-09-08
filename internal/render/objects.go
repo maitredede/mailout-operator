@@ -357,6 +357,13 @@ func Deployment(gw *v1alpha1.MailoutGateway, cfg *gateway.Config, accounts []Acc
 					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
+					// The dataplane never talks to the Kubernetes API: it reads a
+					// file. Mounting the namespace's default ServiceAccount token
+					// into the process that terminates untrusted SMTP and parses
+					// attacker-supplied MIME hands out a cluster identity for
+					// nothing — and a RoleBinding added to that default account
+					// later would silently become the relay's.
+					AutomountServiceAccountToken: ptr.To(false),
 					Containers: []corev1.Container{{
 						Name:  "gateway",
 						Image: image,

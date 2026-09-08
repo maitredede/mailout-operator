@@ -198,19 +198,38 @@ func loadDKIMPrivateKey(k DKIMKey) (crypto.Signer, error) {
 	return parsePrivateKey(block)
 }
 
+// minRSABits is the smallest RSA DKIM key the gateway will sign with.
+//
+// RFC 8301 deprecates 1024-bit RSA for DKIM, and a factored key does not just
+// weaken a signature — it lets whoever factored it mint mail that is
+// DKIM-valid and DMARC-aligned for the domain. A key that old is a key to
+// rotate, not to keep signing with quietly. Go's crypto/rsa refuses below 512
+// on its own, which is far too low to be the only floor.
+const minRSABits = 2048
+
 func parsePrivateKey(block *pem.Block) (crypto.Signer, error) {
 	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
 		switch typed := key.(type) {
 		case *rsa.PrivateKey:
-			return typed, nil
+			return checkRSASize(typed)
 		case ed25519.PrivateKey:
 			return typed, nil
 		default:
 			return nil, fmt.Errorf("unsupported key type %T, want RSA or Ed25519", key)
 		}
 	}
+	// The PKCS#1 branch used to return the key without looking at it at all.
 	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-		return key, nil
+		return checkRSASize(key)
 	}
 	return nil, fmt.Errorf("key is neither PKCS#8 nor PKCS#1")
+}
+
+func checkRSASize(key *rsa.PrivateKey) (crypto.Signer, error) {
+	if bits := key.N.BitLen(); bits < minRSABits {
+		return nil, fmt.Errorf("RSA DKIM key is %d bits, want at least %d: "+
+			"a key this size can be factored, and a factored key signs mail for your domain",
+			bits, minRSABits)
+	}
+	return key, nil
 }
