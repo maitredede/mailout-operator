@@ -111,6 +111,12 @@ The decisions worth knowing about:
   rather than letting mail through uncounted. That makes the store part of the
   critical path, deliberately — a quota that lapses whenever its store hiccups
   is not a quota. Declare none and nothing is counted.
+- **Revoking a credential takes effect on the next message.** Deleting the
+  account, setting `disabled`, or narrowing `allowedSenders` applies to sessions
+  already open, not only to new ones — the account is re-resolved at the start
+  of each transaction. Without that a leaked credential kept working for the
+  life of its connection, and nothing closes an idle one: a `NOOP` every
+  50 seconds stays under the read deadline forever.
 - **Adding an account does not restart anything.** The gateway reloads its
   accounts, keys and certificates from disk; only a change of listener or of
   mounted Secret rolls the pods.

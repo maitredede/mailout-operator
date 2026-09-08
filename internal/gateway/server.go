@@ -462,6 +462,9 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 	if s.account == nil {
 		return smtp.ErrAuthRequired
 	}
+	if err := s.stillAuthorized(); err != nil {
+		return err
+	}
 	policy := s.snap.policyFor(s.account.Username)
 	if !policy.senders.allows(from) {
 		s.server.log.Warn("envelope sender refused",
@@ -472,6 +475,47 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 	s.from = from
 	s.to = nil
 	return nil
+}
+
+// stillAuthorized re-checks the account against the configuration in service,
+// and updates the session's view of it.
+//
+// A session captures a snapshot when it connects, which is what keeps one
+// transaction consistent while a reload happens. But it also meant a credential
+// stayed valid for the life of the connection: deleting the MailoutAccount, or
+// setting disabled, or rotating the password changed nothing for a session
+// already open — and nothing closes an idle one, since a NOOP every 50 seconds
+// keeps it under the read deadline forever. A leaked credential could therefore
+// keep sending after being revoked, indefinitely.
+//
+// Re-resolved at the start of each transaction rather than mid-message, so a
+// revocation takes effect at the next envelope instead of truncating a delivery
+// in flight.
+func (s *session) stillAuthorized() error {
+	current := s.server.snapshot()
+	acct, ok := current.accounts.byUsername[s.account.Username]
+	if !ok || acct.Disabled {
+		s.server.log.Warn("account revoked mid-session, closing",
+			"account", s.account.Username, "remote", s.remoteAddr())
+		_ = s.conn.Close()
+		return errCredentialsRevoked()
+	}
+	// The snapshot is adopted too, so the rest of the transaction sees the
+	// configuration in service rather than the one from connection time: an
+	// account whose senders were narrowed is held to the narrower policy.
+	s.snap = current
+	s.account = acct
+	return nil
+}
+
+// errCredentialsRevoked closes the channel. 421 is what tells a client the
+// service is going away, which is what happens to it.
+func errCredentialsRevoked() *smtp.SMTPError {
+	return &smtp.SMTPError{
+		Code:         421,
+		EnhancedCode: smtp.EnhancedCode{4, 7, 0},
+		Message:      "Credentials are no longer valid",
+	}
 }
 
 // errSpoolFailed is temporary: the relay could not buffer the message, which is
@@ -545,6 +589,9 @@ func (s *session) Data(r io.Reader) error {
 			EnhancedCode: smtp.EnhancedCode{5, 5, 1},
 			Message:      "No valid recipients",
 		}
+	}
+	if err := s.stillAuthorized(); err != nil {
+		return err
 	}
 	// Counted before the message is even read: refusing an account that is over
 	// quota must not first cost the relay the bandwidth and memory of the body

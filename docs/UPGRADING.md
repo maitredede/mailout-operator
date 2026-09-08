@@ -71,6 +71,14 @@ headers, so a message went out with a signature that verifies and a second
 `From` an MUA may be the one to display. Accounts with no `allowedSenders` are
 untouched: they were never signed, so there was nothing to abuse.
 
+**A revocation now reaches a session already open.** Deleting an account,
+disabling it, or narrowing its `allowedSenders` used to change nothing for a
+connection already authenticated — and nothing closes an idle one, so a leaked
+credential kept working indefinitely. The account is re-resolved at the start of
+each transaction and the connection is closed with `421` if it is gone. An
+application holding a long-lived connection through a deliberate narrowing of
+its own policy will see a `550` where it used to see `250`.
+
 **Authentication is now rate limited per connection**, and concurrent
 connections are capped at 64 per listener. A client that retries a wrong
 password more than three times on one connection gets `421` and is
