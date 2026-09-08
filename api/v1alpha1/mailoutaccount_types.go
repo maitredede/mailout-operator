@@ -33,6 +33,16 @@ type MailoutAccountSpec struct {
 
 	// Username defaults to <namespace>.<name>. It must be unique across the
 	// gateway; the webhook rejects a collision.
+	//
+	// The character set is deliberately narrow. This name is interpolated into
+	// the Received header of every message the account sends, so a CR or LF in
+	// it would end the header block and let the account write headers — and a
+	// body — of its own choosing. It is also part of every rate limiting key.
+	// The pattern is what makes that impossible rather than merely unlikely; the
+	// dataplane refuses the account as well, since a rendered configuration is
+	// not the only way to feed it.
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]([a-zA-Z0-9._@+-]{0,126}[a-zA-Z0-9])?$`
 	// +optional
 	Username string `json:"username,omitempty"`
 

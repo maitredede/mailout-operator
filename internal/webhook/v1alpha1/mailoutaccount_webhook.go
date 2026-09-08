@@ -8,6 +8,7 @@ import (
 
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
 	"github.com/maitredede/mailout-operator/internal/controller"
+	"github.com/maitredede/mailout-operator/internal/gateway"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -85,6 +86,23 @@ func (v *AccountValidator) validate(ctx context.Context, account *v1alpha1.Mailo
 		return nil, fmt.Errorf("look up gateway %s: %w", gatewayKey, err)
 	default:
 		errs = append(errs, v.validateAgainstGateway(ctx, account, &gw, spec)...)
+	}
+
+	// The CRD bounds spec.username, but not the default computed from the
+	// namespace and the object name — and that default is what most accounts
+	// actually get. Checking the effective value here is what makes a namespace
+	// or an object name too long for a username fail at kubectl apply, instead
+	// of leaving the account silently dropped from the served configuration.
+	if username := controller.UsernameFor(account); !gateway.ValidUsername(username) {
+		path := spec.Child("username")
+		detail := fmt.Sprintf("must be at most %d printable ASCII characters, "+
+			"without space, colon, semicolon, comma, quote or backslash", gateway.MaxUsernameLength)
+		if account.Spec.Username == "" {
+			detail = fmt.Sprintf("the default username %q is not usable: %s. Set spec.username explicitly.",
+				username, detail)
+			path = field.NewPath("metadata", "name")
+		}
+		errs = append(errs, field.Invalid(path, username, detail))
 	}
 
 	errs = append(errs, validateAllowedSenders(account.Spec.AllowedSenders, spec.Child("allowedSenders"))...)

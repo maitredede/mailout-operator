@@ -167,6 +167,15 @@ func (c *Config) PartitionAccounts() (served []Account, rejected []RejectedAccou
 				Username: account.Username,
 				Reason:   "duplicate username",
 			})
+		case !ValidUsername(account.Username):
+			rejected = append(rejected, RejectedAccount{
+				// The username is not echoed back: it is precisely the value
+				// that may carry control characters, and this reason travels to
+				// a Kubernetes status and to the logs.
+				Username: fmt.Sprintf("accounts[%d]", i),
+				Reason: fmt.Sprintf("username must be at most %d printable ASCII characters "+
+					"without space or delimiter", MaxUsernameLength),
+			})
 		case account.PasswordHash == "":
 			rejected = append(rejected, RejectedAccount{
 				Username: account.Username,
@@ -178,6 +187,32 @@ func (c *Config) PartitionAccounts() (served []Account, rejected []RejectedAccou
 		}
 	}
 	return served, rejected
+}
+
+// maxUsernameLength bounds what the operator's CRD already bounds, for the
+// configurations that never went through it — the standalone file is a
+// supported entry point.
+const MaxUsernameLength = 128
+
+// validUsername reports whether a username is safe to serve.
+//
+// This is the load-bearing check, not a nicety: the username is interpolated
+// into the Received header of every message the account sends, so a CR or LF in
+// it ends the header block and hands the account control of the headers and the
+// body that follow. It is also a component of every rate limiting key. Refusing
+// the account is the only answer that holds for both.
+func ValidUsername(username string) bool {
+	if username == "" || len(username) > MaxUsernameLength {
+		return false
+	}
+	for _, b := range []byte(username) {
+		// Printable ASCII only, and not the delimiters that would let one
+		// username be read as another somewhere downstream.
+		if b <= ' ' || b > '~' || b == ':' || b == ';' || b == ',' || b == '"' || b == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 // Duration is a time.Duration that marshals as a Go duration string ("30s"),

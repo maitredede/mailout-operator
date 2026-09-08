@@ -409,6 +409,75 @@ func TestAccountAllowedSendersValidation(t *testing.T) {
 // unknown field, the API server prunes it — what matters is that it does not
 // survive, since it used to let a tenant name any Secret of the operator's
 // namespace for mounting.
+// The username reaches the Received header of every message the account sends,
+// so a control character in it would let the account write headers of its own.
+// The CRD pattern is what refuses it, before any controller sees the object.
+func TestAccountUsernameRejectsControlCharacters(t *testing.T) {
+	if err := createGateway(t, validGateway("uname")); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	ns := newNamespace(t, "tenant")
+
+	for name, username := range map[string]string{
+		"crlf":      "app1\r\nX-Injected: pwned\r\nFrom: ceo@victim.test\r\n\r\nINJECTED",
+		"line feed": "app1\nX-Injected: pwned",
+		"space":     "app 1",
+		"colon":     "app:1",
+		"too long":  strings.Repeat("a", 129),
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := testClient.Create(t.Context(), &v1alpha1.MailoutAccount{
+				ObjectMeta: metav1.ObjectMeta{Name: "acct-" + strings.Map(alphanumeric, name), Namespace: ns},
+				Spec: v1alpha1.MailoutAccountSpec{
+					GatewayRef: v1alpha1.GatewayReference{Name: "uname"},
+					SecretRef:  v1alpha1.LocalObjectReference{Name: "s"},
+					Username:   username,
+				},
+			})
+			if err == nil {
+				t.Fatalf("username %q was admitted", username)
+			}
+		})
+	}
+}
+
+// The CRD cannot bound the username the operator computes when the field is
+// left empty, so the webhook checks the effective value. Without this, a
+// namespace and an object name that are each legal produce a username that is
+// silently dropped from the served configuration — an account that reports
+// nothing wrong and never works.
+func TestAccountRejectedWhenTheDefaultUsernameIsTooLong(t *testing.T) {
+	if err := createGateway(t, validGateway("longdefault")); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	ns := newNamespace(t, strings.Repeat("n", 50))
+	name := strings.Repeat("a", 90)
+
+	err := testClient.Create(t.Context(), &v1alpha1.MailoutAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: v1alpha1.MailoutAccountSpec{
+			GatewayRef: v1alpha1.GatewayReference{Name: "longdefault"},
+			SecretRef:  v1alpha1.LocalObjectReference{Name: "s"},
+		},
+	})
+	if err == nil {
+		t.Fatalf("an account whose default username is %d characters was admitted", len(ns)+1+len(name))
+	}
+	if !strings.Contains(err.Error(), "spec.username") {
+		t.Errorf("the error should point the tenant at spec.username: %v", err)
+	}
+}
+
+// alphanumeric keeps a subtest name usable as an object name.
+func alphanumeric(r rune) rune {
+	switch {
+	case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		return r
+	default:
+		return -1
+	}
+}
+
 func TestAccountDKIMFieldIsPruned(t *testing.T) {
 	if err := createGateway(t, validGateway("prunedkim")); err != nil {
 		t.Fatalf("create gateway: %v", err)

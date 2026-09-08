@@ -580,11 +580,35 @@ func (s *session) sessionInfo() sessionInfo {
 }
 
 // prependReceived documents the hop, as any relay is expected to.
+//
+// Every interpolated value is scrubbed of anything that could end a header or
+// the header block. A username that could is already refused by validUsername,
+// so this is belt and braces rather than the fix — but a header sink one
+// refactor away from an unchecked source is not a place to rely on a caller.
+// The EHLO name, in particular, is chosen freely by whoever connects.
 func (s *session) prependReceived(data []byte) []byte {
 	header := fmt.Sprintf("Received: from %s (%s)\r\n\tby %s (mailout) with ESMTPSA id %s;\r\n\t%s\r\n",
-		s.conn.Hostname(), s.remoteAddr(), s.snap.config.Hostname,
-		s.account.Username, time.Now().Format(time.RFC1123Z))
+		headerSafe(s.conn.Hostname()), headerSafe(s.remoteAddr()), headerSafe(s.snap.config.Hostname),
+		headerSafe(s.account.Username), time.Now().Format(time.RFC1123Z))
 	return append([]byte(header), data...)
+}
+
+// headerSafeLimit keeps one interpolated value from pushing the Received header
+// past what a receiver will accept, whatever the caller passed.
+const headerSafeLimit = 128
+
+// headerSafe renders a value harmless inside a header: no CR, no LF, no NUL,
+// nothing unprintable, and bounded in length.
+func headerSafe(value string) string {
+	if len(value) > headerSafeLimit {
+		value = value[:headerSafeLimit]
+	}
+	return strings.Map(func(r rune) rune {
+		if r < ' ' || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, value)
 }
 
 func (s *session) remoteAddr() string {
