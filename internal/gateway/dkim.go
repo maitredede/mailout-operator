@@ -25,9 +25,32 @@ type DKIMKey struct {
 	// PKCS#8 form. In a cluster this comes from a Secret.
 	PrivateKeyPEM  string `json:"privateKeyPEM,omitempty"`
 	PrivateKeyFile string `json:"privateKeyFile,omitempty"`
-	// HeaderKeys restricts which headers are signed. Empty means the library's
-	// default set, which is the right choice unless you know otherwise.
+	// HeaderKeys restricts which headers are signed. Empty means the set below,
+	// which oversigns the headers that carry identity — see defaultHeaderKeys.
 	HeaderKeys []string `json:"headerKeys,omitempty"`
+}
+
+// headerKeysFor decides what gets signed. An empty declaration leaves the
+// library's default set, and that is deliberate.
+//
+// Oversigning was the obvious answer to the two-From attack: list From twice, so
+// that a From added after signing breaks the signature instead of riding along
+// under one that still verifies. RFC 6376 §5.4.2 allows it and it is standard
+// practice elsewhere (OpenDKIM's OversignHeaders).
+//
+// It is not done here, and the reason is measured rather than assumed:
+// go-msgauth signs it correctly — it emits h=From:From:Subject — but its own
+// verifier does not implement §5.4.2, so it fails to verify what it just
+// signed (crypto/rsa: verification error). Shipping a signature this project's
+// own end-to-end test cannot verify, on a bet about what every receiver does,
+// trades a hole that is already closed for a deliverability risk that cannot be
+// measured from here.
+//
+// The load-bearing defence is checkHeaderFrom, which now refuses a message
+// with anything other than exactly one well-formed From. Revisit this if the
+// library learns to verify oversigned headers.
+func headerKeysFor(declared []string) []string {
+	return declared
 }
 
 // dkimSigner signs outgoing messages. Signing happens after the milters, so the
@@ -63,7 +86,7 @@ func newDKIMSigner(keys []DKIMKey, log *slog.Logger, metrics *Metrics) (*dkimSig
 			domain:     domain,
 			selector:   k.Selector,
 			signer:     signer,
-			headerKeys: k.HeaderKeys,
+			headerKeys: headerKeysFor(k.HeaderKeys),
 		}
 	}
 	return s, nil

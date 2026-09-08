@@ -69,8 +69,13 @@ type DKIMKeySpec struct {
 	// PrivateKeySecretRef holds an RSA or Ed25519 key in PEM form. Key defaults
 	// to "private.key"; a Secret produced by cert-manager uses "tls.key".
 	PrivateKeySecretRef SecretKeySelector `json:"privateKeySecretRef"`
-	// HeaderKeys restricts which headers are signed. Empty uses the library
-	// default, which is the right choice unless you know otherwise.
+	// HeaderKeys restricts which headers are signed. Empty is the right choice
+	// unless you know otherwise: it oversigns From, so a From added downstream
+	// breaks the signature instead of riding along under one that still
+	// verifies.
+	//
+	// A set you declare must include From — the signing library refuses without
+	// it, and every message of that domain would fail with a 451.
 	// +optional
 	HeaderKeys []string `json:"headerKeys,omitempty"`
 }

@@ -74,6 +74,14 @@ The decisions worth knowing about:
   addresses or domains, and the policy applies to the envelope *and* to the
   `From` header the recipient sees. Declare nothing and mail still relays from
   anywhere — but is never signed.
+- **Where a policy applies, a message needs exactly one well-formed `From`.**
+  Anything else is refused with a `550`, rather than relayed with the check
+  quietly skipped. Every way found around this check worked by leaving nothing
+  to look at: a second `From` after an allowed one, `From :` with a space before
+  the colon, a first line with no colon at all, an unparsable header block. RFC
+  5322 already requires exactly one, which is what makes the strictness safe —
+  and an account that declares no `allowedSenders` is unaffected, since it gets
+  no signature to abuse.
 - **Declaring a sender is what earns a DKIM signature.** A signature vouches for
   a domain, so a key held by the gateway is not authority to use it: without
   this, any account could have any of the gateway's domains signed simply by

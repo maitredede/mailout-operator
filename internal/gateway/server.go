@@ -506,6 +506,17 @@ func errAuthBusy() *smtp.SMTPError {
 	}
 }
 
+// errMalformedHeaders is a permanent refusal. The message cannot be checked
+// against the account's sender policy, and relaying something whose visible
+// sender cannot be determined is exactly what the policy exists to prevent.
+func errMalformedHeaders(why string) *smtp.SMTPError {
+	return &smtp.SMTPError{
+		Code:         550,
+		EnhancedCode: smtp.EnhancedCode{5, 6, 0},
+		Message:      "Malformed message headers: " + why,
+	}
+}
+
 // errSenderNotAllowed is a permanent refusal: the account is not configured for
 // this sender, and retrying will not change that.
 func errSenderNotAllowed(address string) *smtp.SMTPError {
@@ -650,26 +661,65 @@ func resultFor(err error, fallback string) string {
 // checkHeaderFrom applies the sender policy to the message's From header. A
 // message with no From header is left alone: that is a malformed message, not a
 // spoofing attempt, and the upstream is entitled to its own opinion on it.
+// checkHeaderFrom enforces the sender policy on the From header the recipient
+// will actually see.
+//
+// It refuses rather than skips whenever it cannot answer the question. Four ways
+// around this check were found by an adversarial review, and every one of them
+// worked by making the check find nothing to look at:
+//
+//   - a second From header, because the loop returned after the first one. The
+//     signer then covered both, so the message went out with a signature that
+//     verifies and a second From the MUA may be the one to display.
+//   - "From :" with a space before the colon, which parsed as a header named
+//     "From " and matched nothing.
+//   - a first line with no colon at all, which makes the whole message body and
+//     leaves no headers to check.
+//   - an unparsable header block, which returned nil outright.
+//
+// So: exactly one well-formed From, or the message does not go. RFC 5322 §3.6
+// already requires exactly one, which is what makes this strictness safe.
 func checkHeaderFrom(body *spool, policy *senderPolicy) error {
-	header, _, err := body.headerBlock()
+	header, terminated, err := body.headerBlock()
 	if err != nil {
 		return errSpoolFailed(err)
 	}
+	if !terminated {
+		// No blank line within maxHeaderBytes: this is not a message whose
+		// headers can be reasoned about, and treating it as "no From found" is
+		// how the check gets skipped by a megabyte of junk.
+		return errMalformedHeaders("no end of header block found")
+	}
 	parsed, err := parseMessage(header)
 	if err != nil {
-		// Unparsable here means unparsable for the upstream too; let it decide.
-		return nil
+		return errMalformedHeaders("unparsable header block")
 	}
-	for _, header := range parsed.Headers {
-		if !strings.EqualFold(header.Name, "From") {
-			continue
+
+	var found []string
+	for _, field := range parsed.Headers {
+		// A header name may not carry whitespace before its colon (RFC 5322
+		// §2.2), so "From " is not a From header — and must not be treated as
+		// some other header either.
+		if field.Name != strings.TrimRight(field.Name, " \t") {
+			return errMalformedHeaders("whitespace before a header's colon")
 		}
-		if !policy.allows(header.Value) {
-			return errSenderNotAllowed(strings.TrimSpace(header.Value))
+		if strings.EqualFold(field.Name, "From") {
+			found = append(found, field.Value)
+		}
+	}
+	switch len(found) {
+	case 1:
+		if !policy.allows(found[0]) {
+			return errSenderNotAllowed(strings.TrimSpace(found[0]))
 		}
 		return nil
+	case 0:
+		return errMalformedHeaders("no From header")
+	default:
+		// The attack, not a formatting quirk: one From the policy allows and a
+		// second one it would refuse.
+		return errMalformedHeaders("more than one From header")
 	}
-	return nil
 }
 
 // sessionInfo describes the session to the milters, through the sendmail macros

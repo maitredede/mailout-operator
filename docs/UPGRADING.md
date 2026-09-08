@@ -36,6 +36,14 @@ keep in memory. Nothing to do — but if you deploy the dataplane yourself, note
 that it refuses to start when that path is not writable, rather than failing on
 the first large message. Set `limits.spoolDir` to a writable directory.
 
+**A message needs exactly one `From` header — but only for accounts that
+declare `allowedSenders`.** Two `From` headers, `From :` with a space before the
+colon, or a header block with no blank line are now `550`s. They used to relay
+with the sender policy silently skipped, and the signer covered both `From`
+headers, so a message went out with a signature that verifies and a second
+`From` an MUA may be the one to display. Accounts with no `allowedSenders` are
+untouched: they were never signed, so there was nothing to abuse.
+
 **Authentication is now rate limited per connection**, and concurrent
 connections are capped at 64 per listener. A client that retries a wrong
 password more than three times on one connection gets `421` and is

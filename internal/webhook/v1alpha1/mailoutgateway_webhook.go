@@ -321,6 +321,25 @@ func validateDKIM(keys []v1alpha1.DKIMKeySpec, path *field.Path) field.ErrorList
 		if k.PrivateKeySecretRef.Name == "" {
 			errs = append(errs, field.Required(path.Index(i).Child("privateKeySecretRef", "name"), ""))
 		}
+		// A declared set that omits From is not a weaker signature, it is no
+		// signature at all: the signing library refuses outright, and the
+		// gateway turns that into a 451 for every message of that domain.
+		// Caught here, it costs one admission error instead of a mail outage
+		// whose cause is a field nobody suspects.
+		if len(k.HeaderKeys) > 0 && !containsFold(k.HeaderKeys, "From") {
+			errs = append(errs, field.Invalid(path.Index(i).Child("headerKeys"), k.HeaderKeys,
+				"the From header must be signed; a set that omits it makes every message fail with 451"))
+		}
 	}
 	return errs
+}
+
+// containsFold reports whether values holds want, ignoring case.
+func containsFold(values []string, want string) bool {
+	for _, v := range values {
+		if strings.EqualFold(v, want) {
+			return true
+		}
+	}
+	return false
 }

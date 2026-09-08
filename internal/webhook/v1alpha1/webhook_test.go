@@ -412,6 +412,34 @@ func TestAccountAllowedSendersValidation(t *testing.T) {
 // The username reaches the Received header of every message the account sends,
 // so a control character in it would let the account write headers of its own.
 // The CRD pattern is what refuses it, before any controller sees the object.
+// A headerKeys set without From is not a weaker signature, it is a 451 on every
+// message of that domain — the signing library refuses outright.
+func TestGatewayRefusedWhenHeaderKeysOmitFrom(t *testing.T) {
+	err := createGateway(t, validGateway("nofrom", func(gw *v1alpha1.MailoutGateway) {
+		gw.Spec.DKIM = []v1alpha1.DKIMKeySpec{{
+			Domain:              "example.test",
+			Selector:            "sel",
+			PrivateKeySecretRef: v1alpha1.SecretKeySelector{Name: "dkim-example"},
+			HeaderKeys:          []string{"Subject", "Date"},
+		}}
+	}))
+	if err == nil {
+		t.Fatal("a DKIM key signing neither From nor anything containing it was admitted")
+	}
+
+	// Declaring it explicitly is fine.
+	if err := createGateway(t, validGateway("withfrom", func(gw *v1alpha1.MailoutGateway) {
+		gw.Spec.DKIM = []v1alpha1.DKIMKeySpec{{
+			Domain:              "example.test",
+			Selector:            "sel",
+			PrivateKeySecretRef: v1alpha1.SecretKeySelector{Name: "dkim-example"},
+			HeaderKeys:          []string{"from", "Subject"},
+		}}
+	})); err != nil {
+		t.Fatalf("a set including From should be admitted: %v", err)
+	}
+}
+
 func TestAccountUsernameRejectsControlCharacters(t *testing.T) {
 	if err := createGateway(t, validGateway("uname")); err != nil {
 		t.Fatalf("create gateway: %v", err)
