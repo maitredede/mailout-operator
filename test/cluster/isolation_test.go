@@ -25,6 +25,13 @@ import (
 // Before the sender policy existed, this worked: MAIL FROM was accepted
 // verbatim and the signer picked its key from the sender's domain, so any
 // account could make the gateway vouch for any domain it held a key for.
+//
+// What this proves and what it does not: the policy is *enforced* — an account
+// cannot send or have signed a domain outside its own allowedSenders. It does
+// not prove that a tenant cannot *grant itself* that domain, because nothing
+// yet checks that the domains an account declares are its own to declare. That
+// is the per-account delegation still listed as missing in the README, and it
+// is what would close the loop.
 func TestTenantsCannotSignForEachOther(t *testing.T) {
 	cl := startCluster(t)
 	c := cl.Client

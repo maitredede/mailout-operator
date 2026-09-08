@@ -65,7 +65,12 @@ The decisions worth knowing about:
 - **Declaring a sender is what earns a DKIM signature.** A signature vouches for
   a domain, so a key held by the gateway is not authority to use it: without
   this, any account could have any of the gateway's domains signed simply by
-  claiming to send from it — one tenant vouching for another.
+  claiming to send from it — one tenant vouching for another. Mind the limit,
+  though: nothing yet checks that the domains an account declares are its own to
+  declare. On a gateway holding keys for several tenants with
+  `allowedAccounts.namespaces: All`, a tenant can still write another's domain
+  into its own `allowedSenders`. Until per-account delegation exists (below),
+  give each tenant its own gateway or restrict `allowedAccounts`.
 - **DKIM signs after the filters**, so the signature covers the body and headers
   the filters actually left behind. Mail from a domain with no key goes out
   unsigned rather than signed under a domain you do not own.
@@ -312,8 +317,12 @@ produce a container that will not start.
 
 ## Not there yet
 
-`ReferenceGrant`-style per-account delegation, and a spool with bounces for
-clients that cannot retry.
+`ReferenceGrant`-style per-account delegation — an account declares the domains
+it sends from, and nothing but the admin's own namespace policy says those
+domains are its own. This is the one gap that still matters for a gateway shared
+between tenants who do not trust each other.
+
+A spool with bounces, for clients that cannot retry.
 
 ## License
 
