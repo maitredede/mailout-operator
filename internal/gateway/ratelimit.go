@@ -76,6 +76,9 @@ type RateLimitStore struct {
 	// Timeout bounds every call to the store. It is on the path of every
 	// message, so it must be short: the whole point of failing closed is that a
 	// missing store stops mail, and a long timeout turns that into a hang.
+	//
+	// It is per call, not per message: a message counted against both dimensions
+	// makes two calls, so a message can wait up to twice this.
 	Timeout Duration `json:"timeout,omitempty"`
 }
 
@@ -216,8 +219,6 @@ func (l *limiter) check(ctx context.Context, account string, recipients int) err
 	if timeout == 0 {
 		timeout = defaultRateLimitTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	for _, dimension := range []struct {
 		name  string
@@ -231,7 +232,7 @@ func (l *limiter) check(ctx context.Context, account string, recipients int) err
 		if dimension.limit <= 0 || dimension.by <= 0 {
 			continue
 		}
-		count, err := l.increment(ctx, account, dimension.name, dimension.by)
+		count, err := l.increment(ctx, account, dimension.name, dimension.by, timeout)
 		if err != nil {
 			l.log.Error("quota store unreachable, refusing the message",
 				"account", account, "dimension", dimension.name, "err", err)
@@ -258,7 +259,14 @@ func (l *limiter) check(ctx context.Context, account string, recipients int) err
 // key, so this is safe on a cluster without a hash tag — and without one, keys
 // spread across slots instead of piling onto whichever slot a gateway's tag
 // happened to hash to.
-func (l *limiter) increment(ctx context.Context, account, dimension string, by int64) (int64, error) {
+func (l *limiter) increment(ctx context.Context, account, dimension string, by int64, timeout time.Duration) (int64, error) {
+	// The timeout bounds this call rather than the whole check, which is what
+	// its documentation promises. Bounding the check instead would let a slow
+	// first dimension eat the budget of the second, and refuse a message
+	// fail-closed while the store was in fact answering.
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	key := l.key(account, dimension)
 	pipe := l.client.Pipeline()
 	incr := pipe.IncrBy(ctx, key, by)

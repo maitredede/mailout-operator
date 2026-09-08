@@ -5,6 +5,7 @@ package gateway
 import (
 	"errors"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,7 +79,15 @@ func TestStoreModeIsDeducedFromTheAddresses(t *testing.T) {
 	}
 }
 
-func TestSameStoreDetectsEveryChange(t *testing.T) {
+// Every field of the store must be compared: a change that goes unnoticed keeps
+// the previous connection pool, so a rotated password would leave the gateway
+// talking to the store with a credential that no longer works — and since it
+// fails closed, that stops mail.
+//
+// The fields are walked by reflection rather than listed, so that adding one to
+// RateLimitStore without teaching sameStore about it fails here instead of in
+// production.
+func TestSameStoreComparesEveryField(t *testing.T) {
 	base := RateLimitStore{
 		Addresses: []string{"valkey:6379"},
 		Password:  "s3cret",
@@ -87,20 +96,28 @@ func TestSameStoreDetectsEveryChange(t *testing.T) {
 	if !sameStore(base, base) {
 		t.Fatal("a store is not the same as itself")
 	}
-	for name, mutate := range map[string]func(*RateLimitStore){
-		"addresses":  func(s *RateLimitStore) { s.Addresses = []string{"other:6379"} },
-		"masterName": func(s *RateLimitStore) { s.MasterName = "mailout" },
-		"db":         func(s *RateLimitStore) { s.DB = 2 },
-		"password":   func(s *RateLimitStore) { s.Password = "other" },
-		"tls":        func(s *RateLimitStore) { s.TLS = true },
-		"timeout":    func(s *RateLimitStore) { s.Timeout = Duration(time.Second) },
-	} {
-		t.Run(name, func(t *testing.T) {
+
+	typ := reflect.TypeOf(base)
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		t.Run(field.Name, func(t *testing.T) {
 			changed := base
 			changed.Addresses = append([]string(nil), base.Addresses...)
-			mutate(&changed)
+			v := reflect.ValueOf(&changed).Elem().Field(i)
+			switch v.Kind() {
+			case reflect.String:
+				v.SetString(v.String() + "-other")
+			case reflect.Int, reflect.Int64:
+				v.SetInt(v.Int() + 1)
+			case reflect.Bool:
+				v.SetBool(!v.Bool())
+			case reflect.Slice:
+				v.Set(reflect.ValueOf([]string{"other:6379", "third:6379"}))
+			default:
+				t.Fatalf("no mutation known for %s (%s): teach this test about it", field.Name, v.Kind())
+			}
 			if sameStore(base, changed) {
-				t.Errorf("a change to %s went unnoticed, so the connection would not be rebuilt", name)
+				t.Errorf("a change to %s went unnoticed, so the connection pool would be kept", field.Name)
 			}
 		})
 	}

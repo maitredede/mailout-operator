@@ -174,7 +174,8 @@ func TestAuthFailureOnUnknownUserDoesNotCreateALabel(t *testing.T) {
 }
 
 // A reload that is refused must leave the gauges describing what is actually
-// running, not what was asked for.
+// running, not what was asked for: the previous configuration stays in service,
+// so anything else would have the metrics describe a relay that does not exist.
 func TestConfigReloadIsCounted(t *testing.T) {
 	gw := newTestGateway(t)
 
@@ -184,6 +185,33 @@ func TestConfigReloadIsCounted(t *testing.T) {
 	}
 	if got := counter(t, gw, "mailout_accounts", nil); got != 1 {
 		t.Errorf("served accounts = %v, want 1", got)
+	}
+
+	// A configuration with two accounts, refused for something common to all of
+	// them: neither the count of accounts nor anything else about it is served.
+	refused := &Config{
+		Hostname: "gateway.test",
+		Accounts: []Account{
+			{Username: "one", PasswordHash: mustHash(t, "pw")},
+			{Username: "two", PasswordHash: mustHash(t, "pw")},
+		},
+	}
+	if err := gw.srv.Reload(refused); err == nil {
+		t.Fatal("a configuration with no listener was accepted")
+	}
+
+	if got := counter(t, gw, "mailout_config_reloads_total",
+		map[string]string{"result": "failure"}); got != 1 {
+		t.Errorf("failed reloads = %v, want 1", got)
+	}
+	if got := counter(t, gw, "mailout_config_reloads_total",
+		map[string]string{"result": "success"}); got != 1 {
+		t.Errorf("successful reloads = %v, want 1 after a refused reload", got)
+	}
+	// Still the one account of the running configuration, not the two that were
+	// refused.
+	if got := counter(t, gw, "mailout_accounts", nil); got != 1 {
+		t.Errorf("served accounts = %v, want 1: the refused configuration is not the one in service", got)
 	}
 }
 

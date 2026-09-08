@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
+	"github.com/maitredede/mailout-operator/internal/render"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -125,6 +126,25 @@ func TestGatewayRefusedWithCollidingListenerPorts(t *testing.T) {
 	}))
 	if err == nil {
 		t.Fatal("two listeners on the same port were admitted")
+	}
+}
+
+// The metrics port is not configurable, so a listener claiming it would have the
+// two bind the same address: one loses with EADDRINUSE and takes the process
+// down, and the pod crash-loops for a reason nothing in the spec hints at.
+func TestGatewayRefusedWhenAListenerClaimsTheMetricsPort(t *testing.T) {
+	for name, listeners := range map[string]v1alpha1.ListenersSpec{
+		"submission": {Submission: &v1alpha1.ListenerSpec{Port: render.MetricsPort}},
+		"smtps":      {SMTPS: &v1alpha1.ListenerSpec{Port: render.MetricsPort}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := createGateway(t, validGateway("metrics-port-"+name, func(gw *v1alpha1.MailoutGateway) {
+				gw.Spec.Listeners = listeners
+			}))
+			if err == nil {
+				t.Fatalf("a %s listener on the metrics port was admitted", name)
+			}
+		})
 	}
 }
 

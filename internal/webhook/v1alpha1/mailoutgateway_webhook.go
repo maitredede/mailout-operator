@@ -14,6 +14,7 @@ import (
 
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
 	"github.com/maitredede/mailout-operator/internal/gateway"
+	"github.com/maitredede/mailout-operator/internal/render"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -186,22 +187,42 @@ func (v *GatewayValidator) validateTLS(gw *v1alpha1.MailoutGateway, path *field.
 func (v *GatewayValidator) validateListeners(gw *v1alpha1.MailoutGateway, path *field.Path) field.ErrorList {
 	var errs field.ErrorList
 	submission, smtps := gw.Spec.Listeners.Submission, gw.Spec.Listeners.SMTPS
-	if submission == nil || smtps == nil {
-		return errs
+
+	if submission != nil && smtps != nil {
+		if submissionPort, smtpsPort := listenerPort(submission, 587), listenerPort(smtps, 465); submissionPort == smtpsPort {
+			errs = append(errs, field.Invalid(path.Child("smtps", "port"), smtpsPort,
+				"the two listeners cannot share a port"))
+		}
 	}
-	submissionPort := submission.Port
-	if submissionPort == 0 {
-		submissionPort = 587
-	}
-	smtpsPort := smtps.Port
-	if smtpsPort == 0 {
-		smtpsPort = 465
-	}
-	if submissionPort == smtpsPort {
-		errs = append(errs, field.Invalid(path.Child("smtps", "port"), smtpsPort,
-			"the two listeners cannot share a port"))
+
+	// The metrics endpoint is served by the same process, on a port that is not
+	// configurable. A listener claiming it makes the two race for the bind, one
+	// loses with EADDRINUSE and takes the process down with it — so the pod
+	// crash-loops, and which of the two failed is not even deterministic.
+	for _, listener := range []struct {
+		name    string
+		spec    *v1alpha1.ListenerSpec
+		defPort int32
+	}{
+		{"submission", submission, 587},
+		{"smtps", smtps, 465},
+	} {
+		if listener.spec == nil {
+			continue
+		}
+		if port := listenerPort(listener.spec, listener.defPort); port == render.MetricsPort {
+			errs = append(errs, field.Invalid(path.Child(listener.name, "port"), port,
+				fmt.Sprintf("port %d is the gateway's own metrics port; the pod would fail to bind both", render.MetricsPort)))
+		}
 	}
 	return errs
+}
+
+func listenerPort(spec *v1alpha1.ListenerSpec, def int32) int32 {
+	if spec.Port == 0 {
+		return def
+	}
+	return spec.Port
 }
 
 func validateMilters(milters []v1alpha1.MilterSpec, path *field.Path) field.ErrorList {

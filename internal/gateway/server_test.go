@@ -109,6 +109,9 @@ type testGateway struct {
 	upstream       *fakeUpstream
 	caPool         *x509.CertPool
 	metrics        *Metrics
+	// srv is kept so a test can reload the running server, which is the only
+	// way to exercise what a refused reload leaves behind.
+	srv *Server
 }
 
 const (
@@ -174,7 +177,7 @@ func newTestGateway(t *testing.T, opts ...func(*Config)) *testGateway {
 		}
 	})
 
-	gw := &testGateway{upstream: upstream, caPool: pool, metrics: metrics}
+	gw := &testGateway{upstream: upstream, caPool: pool, metrics: metrics, srv: srv}
 	for range 2 {
 		select {
 		case addr := <-addrs:
