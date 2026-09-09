@@ -81,9 +81,18 @@ install: manifests ## CRDs only
 	go tool kustomize build config/crd | kubectl apply -f -
 
 .PHONY: deploy
+# deploy builds from a copy of config/: `kustomize edit set image` rewrites the
+# kustomization in place, so deploying used to leave your registry committed in
+# the repo — and the cluster test, which substitutes the default image, then
+# tried to pull whatever you had deployed last. The binary is resolved before
+# leaving the module, because `go tool` needs a go.mod to find it.
 deploy: manifests ## the whole operator; needs cert-manager for the webhook certificate
-	cd config/default && go tool kustomize edit set image ghcr.io/maitredede/mailout-operator=$(IMG)
-	go tool kustomize build config/default | kubectl apply -f -
+	@kustomize=$$(go tool -n kustomize) && \
+		tmp=$$(mktemp -d) && trap 'rm -rf $$tmp' EXIT && \
+		cp -r config $$tmp/ && \
+		cd $$tmp/config/default && \
+		"$$kustomize" edit set image ghcr.io/maitredede/mailout-operator=$(IMG) && \
+		"$$kustomize" build . | kubectl apply -f -
 
 .PHONY: undeploy
 undeploy:

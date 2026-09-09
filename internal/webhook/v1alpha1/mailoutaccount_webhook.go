@@ -63,10 +63,6 @@ func (v *AccountValidator) validate(ctx context.Context, account *v1alpha1.Mailo
 	var warnings admission.Warnings
 	spec := field.NewPath("spec")
 
-	if len(account.Spec.AllowedSenders) == 0 {
-		warnings = append(warnings, "spec.allowedSenders is empty: this account may send from "+
-			"any address, and its mail will not be DKIM-signed at all")
-	}
 	if account.Spec.EnforceHeaderFrom != nil && !*account.Spec.EnforceHeaderFrom {
 		warnings = append(warnings, "spec.enforceHeaderFrom is false: this account may put any "+
 			"address in the From header its recipients will see")

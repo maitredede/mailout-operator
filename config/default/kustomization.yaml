@@ -31,5 +31,4 @@ replacements:
 
 images:
 - name: ghcr.io/maitredede/mailout-operator
-  newName: dkr.daly.nc/mailout/operator
-  newTag: 0.1.0-40a97cf
+  newTag: dev
