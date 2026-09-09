@@ -63,18 +63,35 @@ jobs:
           cache-dependency-path: go.sum
           cache: true
 
+      # Les recettes du Makefile sont recopiées ici plutôt qu'appelées : l'image
+      # ghcr.io/actions/actions-runner n'embarque pas make, et le runner tourne
+      # en uid 1001 sans sudo, donc rien à installer. C'est pour la même raison
+      # que le workflow réutilisable go-ci appelle `go` directement.
+      #
       # controller-gen produit les CRD et le code deepcopy. S'ils diffèrent de ce
       # qui est versionné, un `make manifests` a été oublié : le cluster
       # recevrait des CRD qui ne décrivent pas les types du binaire.
       - name: Manifests à jour
         run: |
           set -euo pipefail
-          make generate manifests
+          go tool controller-gen object:headerFile=hack/boilerplate.go.txt \
+            paths=./api/... paths=./internal/certmanager/... paths=./internal/monitoring/...
+          go tool controller-gen crd rbac:roleName=mailout-operator webhook \
+            paths=./api/... paths=./internal/controller/... paths=./internal/webhook/... \
+            output:crd:artifacts:config=config/crd/bases
           if ! git diff --exit-code; then
             echo "::error::config/ et zz_generated ne correspondent pas au code : lancer make generate manifests"
             exit 1
           fi
 
-      - name: make test-envtest
-        run: make test-envtest
+      # La version des binaires envtest est lue dans le Makefile plutôt que
+      # répétée : deux endroits qui la déclarent, c'est un jour où la CI teste
+      # contre un autre control plane que le poste.
+      - name: Tests envtest
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^ENVTEST_K8S_VERSION ?= //p' Makefile)
+          test -n "$version" || { echo "::error::ENVTEST_K8S_VERSION introuvable dans le Makefile"; exit 1; }
+          KUBEBUILDER_ASSETS="$(go tool setup-envtest use "$version" -p path)" \
+            go test ./internal/controller/... ./internal/webhook/... -count=1 -tags=envtest
 
