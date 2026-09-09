@@ -36,6 +36,21 @@ type MailoutGatewaySpec struct {
 	// +optional
 	AllowedAccounts AllowedAccountsSpec `json:"allowedAccounts,omitempty"`
 
+	// AllowedSenders grants sending rights. It is the gateway owner's decision
+	// about who may send from what, and nothing an account declares can go
+	// beyond it.
+	//
+	// Empty means no account on this gateway may send anything. That is
+	// deliberate: an account used to declare its own senders, and on a gateway
+	// holding keys for several tenants nothing stopped one from writing
+	// another's domain into its own list and having it signed. The authority
+	// has to sit with whoever owns the gateway and the keys.
+	//
+	// An account's own allowedSenders can only narrow what its namespace was
+	// granted; an account that declares nothing gets the whole grant.
+	// +optional
+	AllowedSenders []SenderGrantSpec `json:"allowedSenders,omitempty"`
+
 	// RateLimit caps what each account of this gateway may send, counted in a
 	// store shared by every replica.
 	// +optional
@@ -400,4 +415,23 @@ type NetworkPeer struct {
 	// selected namespaces.
 	// +optional
 	PodSelector *metav1.LabelSelector `json:"podSelector,omitempty"`
+}
+
+// SenderGrantSpec grants a set of sender addresses to a set of namespaces.
+type SenderGrantSpec struct {
+	// Senders lists what is granted, either as an exact address
+	// (noreply@example.com) or as a whole domain (*@example.com). The wildcard
+	// stands for the local part only: there is no wildcard on the domain, so a
+	// grant can never widen beyond domains you named.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=256
+	Senders []string `json:"senders"`
+
+	// NamespaceSelector restricts the grant to namespaces whose labels match.
+	// Omitted, the grant applies to every namespace the gateway accepts — which
+	// is what a single-tenant gateway wants, and what a shared one must not
+	// use for a domain that belongs to one tenant.
+	// +optional
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
 }

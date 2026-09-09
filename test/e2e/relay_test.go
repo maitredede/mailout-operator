@@ -106,19 +106,25 @@ func TestUndeclaredSenderIsRefused(t *testing.T) {
 	}
 }
 
-// An account with no policy still relays, from anywhere — and is signed
-// nowhere, even for a domain the gateway holds a key for. That is the trade:
-// declaring a sender is what earns a signature.
-func TestAccountWithoutPolicyRelaysUnsigned(t *testing.T) {
+// A domain the gateway holds no key for relays unsigned, rather than being
+// signed under a domain that is not the sender's. And a domain granted to
+// someone else is refused outright, which is the same account proving both
+// halves of the rule.
+func TestGrantedDomainWithoutAKeyRelaysUnsigned(t *testing.T) {
 	stack := newStack(t, newNetwork(t))
 
+	if err := stack.sendAs(t, openUsername, "not mine", "app@"+testDomain,
+		"a domain granted to another account"); err == nil {
+		t.Fatal("an account sent from a domain it was not granted")
+	}
+
 	const subject = "e2e unsigned"
-	if err := stack.sendAs(t, openUsername, subject, "app@"+testDomain, "no policy declared"); err != nil {
+	if err := stack.sendAs(t, openUsername, subject, "app@"+unsignedDomain, "granted, unsigned"); err != nil {
 		t.Fatalf("submission refused: %v", err)
 	}
 	msg := stack.Mailpit.waitForMessage(t, subject, 15*time.Second)
 	if raw := stack.Mailpit.raw(t, msg.ID); strings.Contains(raw, "DKIM-Signature:") {
-		t.Fatalf("an account with no declared sender got its mail signed:\n%s", raw)
+		t.Fatalf("a domain with no key on the gateway got signed anyway:\n%s", raw)
 	}
 }
 

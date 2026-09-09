@@ -128,6 +128,7 @@ func (v *AccountValidator) validate(ctx context.Context, account *v1alpha1.Mailo
 	}
 
 	errs = append(errs, validateAllowedSenders(account.Spec.AllowedSenders, spec.Child("allowedSenders"))...)
+	errs = append(errs, v.validateAgainstGrant(ctx, account, spec.Child("allowedSenders"))...)
 	errs = append(errs, v.validateSecretRef(ctx, account, spec.Child("secretRef"))...)
 
 	if len(errs) > 0 {
@@ -177,6 +178,52 @@ func (v *AccountValidator) validateAgainstGateway(ctx context.Context, account *
 				fmt.Sprintf("%s is already taken on this gateway", username)))
 			break
 		}
+	}
+	return errs
+}
+
+// validateAgainstGrant refuses senders the account's namespace was not granted.
+//
+// The gateway's owner decides who may send from what. Without this an account
+// declared its own sending rights, and on a gateway holding keys for several
+// tenants nothing stopped one from writing another's domain into its own list
+// and having it signed.
+//
+// Refused at admission rather than dropped later: an account whose senders were
+// silently discarded would report nothing wrong and have its mail refused.
+func (v *AccountValidator) validateAgainstGrant(ctx context.Context,
+	account *v1alpha1.MailoutAccount, path *field.Path) field.ErrorList {
+	if len(account.Spec.AllowedSenders) == 0 {
+		// Nothing asked for means the whole grant, which needs no checking.
+		return nil
+	}
+
+	gatewayNamespace := controller.GatewayNamespaceFor(account, v.OperatorNamespace)
+	var gw v1alpha1.MailoutGateway
+	if err := v.Reader.Get(ctx, client.ObjectKey{
+		Namespace: gatewayNamespace, Name: account.Spec.GatewayRef.Name,
+	}, &gw); err != nil {
+		// The caller already reported a missing gateway; nothing to add.
+		return nil
+	}
+
+	granted, err := controller.GrantedSendersFor(ctx, v.Reader, &gw, account.Namespace)
+	if err != nil {
+		// Cannot resolve the grant, so cannot say the account is within it.
+		// Refusing the write is better than admitting something unchecked.
+		return field.ErrorList{field.InternalError(path, err)}
+	}
+
+	_, refused := gateway.GrantedSubset(granted, account.Spec.AllowedSenders)
+	var errs field.ErrorList
+	for _, entry := range refused {
+		detail := fmt.Sprintf("not granted to namespace %s by MailoutGateway %s/%s",
+			account.Namespace, gw.Namespace, gw.Name)
+		if len(granted) == 0 {
+			detail = fmt.Sprintf("MailoutGateway %s/%s grants this namespace no sender at all; "+
+				"its owner has to add one to spec.allowedSenders", gw.Namespace, gw.Name)
+		}
+		errs = append(errs, field.Invalid(path, entry, detail))
 	}
 	return errs
 }

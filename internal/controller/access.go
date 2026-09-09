@@ -61,3 +61,58 @@ func UsernameFor(account *v1alpha1.MailoutAccount) string {
 	}
 	return account.Namespace + "." + account.Name
 }
+
+// grantedSenders is the union of the gateway's sender grants that apply to a
+// namespace.
+//
+// The gateway's owner decides who may send from what; a grant with no selector
+// applies to every namespace the gateway accepts, which is what a single-tenant
+// gateway wants and what a shared one must not use for a domain belonging to
+// one tenant.
+func grantedSenders(ctx context.Context, c client.Reader, gw *v1alpha1.MailoutGateway,
+	namespace string, nsLabels *labels.Set) ([]string, error) {
+	var granted []string
+	for i, grant := range gw.Spec.AllowedSenders {
+		if grant.NamespaceSelector != nil {
+			selector, err := metav1.LabelSelectorAsSelector(grant.NamespaceSelector)
+			if err != nil {
+				return nil, fmt.Errorf("invalid allowedSenders[%d].namespaceSelector: %w", i, err)
+			}
+			if *nsLabels == nil {
+				set, err := namespaceLabels(ctx, c, namespace)
+				if err != nil {
+					return nil, err
+				}
+				*nsLabels = set
+			}
+			if !selector.Matches(*nsLabels) {
+				continue
+			}
+		}
+		granted = append(granted, grant.Senders...)
+	}
+	return granted, nil
+}
+
+// namespaceLabels reads a namespace's labels, once per account rather than once
+// per grant.
+func namespaceLabels(ctx context.Context, c client.Reader, namespace string) (labels.Set, error) {
+	var ns corev1.Namespace
+	if err := c.Get(ctx, client.ObjectKey{Name: namespace}, &ns); err != nil {
+		return nil, fmt.Errorf("get namespace %s: %w", namespace, err)
+	}
+	if ns.Labels == nil {
+		// Distinguishable from "not looked up yet" by the caller, which checks
+		// for nil: an empty map means looked up and unlabelled.
+		return labels.Set{}, nil
+	}
+	return labels.Set(ns.Labels), nil
+}
+
+// GrantedSendersFor is grantedSenders for callers outside the reconcile loop —
+// the admission webhook, which checks one account at a time.
+func GrantedSendersFor(ctx context.Context, c client.Reader, gw *v1alpha1.MailoutGateway,
+	namespace string) ([]string, error) {
+	var nsLabels labels.Set
+	return grantedSenders(ctx, c, gw, namespace, &nsLabels)
+}

@@ -79,8 +79,8 @@ func TestNarrowedSenderPolicyAppliesToAnOpenSession(t *testing.T) {
 	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
 		t.Fatalf("AUTH: %v", err)
 	}
-	if err := c.Mail("anything@wherever.test", nil); err != nil {
-		t.Fatalf("MAIL FROM with no policy: %v", err)
+	if err := c.Mail("app@example.test", nil); err != nil {
+		t.Fatalf("MAIL FROM within the granted policy: %v", err)
 	}
 	if err := c.Reset(); err != nil {
 		t.Fatalf("RSET: %v", err)
@@ -88,12 +88,13 @@ func TestNarrowedSenderPolicyAppliesToAnOpenSession(t *testing.T) {
 
 	cfg := *gw.srv.current.Load().config
 	cfg.Accounts = append([]Account(nil), cfg.Accounts...)
-	cfg.Accounts[0].AllowedSenders = []string{"*@example.test"}
+	cfg.Accounts[0].AllowedSenders = []string{"noreply@example.test"}
 	if err := gw.srv.Reload(&cfg); err != nil {
 		t.Fatalf("reload with a narrower policy: %v", err)
 	}
 
-	err := c.Mail("anything@wherever.test", nil)
+	// Allowed before the reload by *@example.test, refused after it.
+	err := c.Mail("app@example.test", nil)
 	if err == nil {
 		t.Fatal("the open session kept the policy it connected with")
 	}

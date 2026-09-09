@@ -176,7 +176,13 @@ func newTestGateway(t *testing.T, opts ...func(*Config)) *testGateway {
 		}},
 		Upstream: Upstream{Host: upHost, Port: upPort, TLS: TLSModeNone},
 		Accounts: []Account{
-			{Username: testAccount, PasswordHash: mustHash(t, testPassword)},
+			// Granted by the gateway's owner: an account with nothing granted
+			// now sends nothing, so a test fixture has to say what it may send.
+			{
+				Username:       testAccount,
+				PasswordHash:   mustHash(t, testPassword),
+				AllowedSenders: []string{"*@example.test"},
+			},
 		},
 	}
 
@@ -257,7 +263,7 @@ func TestSubmissionRelaysMessage(t *testing.T) {
 	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
 		t.Fatalf("AUTH PLAIN: %v", err)
 	}
-	body := "Subject: hello\r\n\r\nbody\r\n"
+	body := "From: app@example.test\r\nSubject: hello\r\n\r\nbody\r\n"
 	if err := c.SendMail("app@example.test", []string{"dest@example.test"}, strings.NewReader(body)); err != nil {
 		t.Fatalf("SendMail: %v", err)
 	}
@@ -346,7 +352,7 @@ func TestImplicitTLSListener(t *testing.T) {
 		t.Fatalf("AUTH: %v", err)
 	}
 	if err := c.SendMail("app@example.test", []string{"dest@example.test"},
-		strings.NewReader("Subject: implicit\r\n\r\nbody\r\n")); err != nil {
+		strings.NewReader("From: app@example.test\r\nSubject: implicit\r\n\r\nbody\r\n")); err != nil {
 		t.Fatalf("SendMail: %v", err)
 	}
 	if len(gw.upstream.received()) != 1 {
@@ -368,7 +374,7 @@ func TestUpstreamRejectionIsPropagated(t *testing.T) {
 		t.Fatalf("AUTH: %v", err)
 	}
 	err := c.SendMail("app@example.test", []string{"dest@example.test"},
-		strings.NewReader("Subject: nope\r\n\r\nbody\r\n"))
+		strings.NewReader("From: app@example.test\r\nSubject: nope\r\n\r\nbody\r\n"))
 	if err == nil {
 		t.Fatal("expected the upstream rejection to be propagated")
 	}
@@ -390,7 +396,7 @@ func TestFilteredMessageIsRejectedBeforeRelaying(t *testing.T) {
 		t.Fatalf("AUTH: %v", err)
 	}
 	err := c.SendMail("app@example.test", []string{"dest@example.test"},
-		strings.NewReader("Subject: infected\r\n\r\n"+eicarPattern+"\r\n"))
+		strings.NewReader("From: app@example.test\r\nSubject: infected\r\n\r\n"+eicarPattern+"\r\n"))
 	if err == nil {
 		t.Fatal("expected the infected message to be rejected")
 	}
@@ -415,7 +421,7 @@ func TestFilteredMessageKeepsFilterHeader(t *testing.T) {
 		t.Fatalf("AUTH: %v", err)
 	}
 	if err := c.SendMail("app@example.test", []string{"dest@example.test"},
-		strings.NewReader("Subject: fine\r\n\r\nhello\r\n")); err != nil {
+		strings.NewReader("From: app@example.test\r\nSubject: fine\r\n\r\nhello\r\n")); err != nil {
 		t.Fatalf("SendMail: %v", err)
 	}
 	msgs := gw.upstream.received()
@@ -443,7 +449,7 @@ func TestAnAccountCannotSkipAFilter(t *testing.T) {
 		t.Fatalf("AUTH: %v", err)
 	}
 	err := c.SendMail("app@example.test", []string{"dest@example.test"},
-		strings.NewReader("Subject: fine\r\n\r\nhello\r\n"))
+		strings.NewReader("From: app@example.test\r\nSubject: fine\r\n\r\nhello\r\n"))
 	if err == nil {
 		t.Fatal("the filter did not run for this account")
 	}
@@ -570,20 +576,22 @@ func TestSkipHeaderFromCheckAllowsAnyFromHeader(t *testing.T) {
 	}
 }
 
-// An account with no declared sender keeps working, unchanged: that is what
-// makes the policy adoptable rather than a flag day.
-func TestAccountWithoutPolicyStillRelays(t *testing.T) {
-	gw := newTestGateway(t)
+// An account granted nothing sends nothing. This used to be the opposite — no
+// declaration meant "send from anywhere, unsigned" — and that default is what
+// let a tenant decide its own sending rights.
+func TestAccountGrantedNothingSendsNothing(t *testing.T) {
+	gw := newTestGateway(t, func(cfg *Config) {
+		cfg.Accounts[0].AllowedSenders = nil
+	})
 	c := gw.dialSubmission(t)
 	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
 		t.Fatalf("AUTH: %v", err)
 	}
-	if err := c.SendMail("anything@anywhere.test", []string{"dest@example.test"},
-		strings.NewReader("From: anything@anywhere.test\r\nSubject: free\r\n\r\nbody\r\n")); err != nil {
-		t.Fatalf("SendMail: %v", err)
+	if err := c.Mail("anything@anywhere.test", nil); err == nil {
+		t.Fatal("an account with nothing granted opened a transaction")
 	}
-	if len(gw.upstream.received()) != 1 {
-		t.Fatal("message not relayed")
+	if len(gw.upstream.received()) != 0 {
+		t.Error("something reached the upstream")
 	}
 }
 
@@ -605,7 +613,7 @@ func TestBrokenAccountDoesNotStopTheGateway(t *testing.T) {
 		t.Fatalf("the working account can no longer authenticate: %v", err)
 	}
 	if err := c.SendMail("app@example.test", []string{"dest@example.test"},
-		strings.NewReader("Subject: still working\r\n\r\nbody\r\n")); err != nil {
+		strings.NewReader("From: app@example.test\r\nSubject: still working\r\n\r\nbody\r\n")); err != nil {
 		t.Fatalf("SendMail: %v", err)
 	}
 	if len(gw.upstream.received()) != 1 {

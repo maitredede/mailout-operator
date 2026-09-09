@@ -71,7 +71,7 @@ func TestRelayedMessageIsCounted(t *testing.T) {
 	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
 		t.Fatalf("AUTH: %v", err)
 	}
-	body := "Subject: hello\r\n\r\nbody\r\n"
+	body := "From: app@example.test\r\nSubject: hello\r\n\r\nbody\r\n"
 	if err := c.SendMail("app@example.test", []string{"dest@example.test"}, strings.NewReader(body)); err != nil {
 		t.Fatalf("SendMail: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestUpstreamFailureIsCountedAsDeferred(t *testing.T) {
 		t.Fatalf("AUTH: %v", err)
 	}
 	err := c.SendMail("app@example.test", []string{"dest@example.test"},
-		strings.NewReader("Subject: hi\r\n\r\nbody\r\n"))
+		strings.NewReader("From: app@example.test\r\nSubject: hi\r\n\r\nbody\r\n"))
 	if err == nil {
 		t.Fatal("expected the submission to fail")
 	}

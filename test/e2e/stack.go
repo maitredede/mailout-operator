@@ -39,12 +39,16 @@ const (
 // Account credentials the tests authenticate with.
 const (
 	testUsername = "app1"
-	// openUsername declares no sender policy: free to send, never signed.
+	// openUsername is granted a domain the gateway holds no key for, so its
+	// mail relays unsigned. Before sending rights moved to the gateway, this
+	// was an account that declared nothing and could send from anywhere.
 	openUsername = "open1"
 	testPassword = "e2e-password"
 	testCertName = "mailout.e2e.test"
 	testDomain   = "example.test"
-	testSelector = "mail"
+	// unsignedDomain has no DKIM key on the gateway.
+	unsignedDomain = "elsewhere.test"
+	testSelector   = "mail"
 )
 
 // eicar is the standard antivirus test string. Written in pieces so that this
@@ -176,10 +180,12 @@ func newStack(t *testing.T, network *testcontainers.DockerNetwork, opts ...stack
 				AllowedSenders: []string{"*@" + testDomain},
 			},
 			{
-				// No policy: sends from anywhere, signed nowhere. This is what
-				// an account looks like before it is tightened up.
-				Username:     openUsername,
-				PasswordHash: hash,
+				// Granted a domain the gateway holds no DKIM key for: it may
+				// send, and its mail goes out unsigned rather than signed under
+				// a domain that is not its own.
+				Username:       openUsername,
+				PasswordHash:   hash,
+				AllowedSenders: []string{"*@" + unsignedDomain},
 			},
 		},
 		DKIM: []gateway.DKIMKey{{

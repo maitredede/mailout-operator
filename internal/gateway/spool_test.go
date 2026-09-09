@@ -172,7 +172,7 @@ func TestLargeMessageRelaysWithoutSizingTheHeap(t *testing.T) {
 	// this process would be counted by the measurement below and hide whatever
 	// the gateway itself is doing.
 	source := io.MultiReader(
-		strings.NewReader("Subject: big\r\n\r\n"),
+		strings.NewReader("From: app@example.test\r\nSubject: big\r\n\r\n"),
 		io.LimitReader(&lineReader{}, bodySize),
 	)
 	if err := c.SendMail("app@example.test", []string{"dest@example.test"}, source); err != nil {
@@ -275,7 +275,7 @@ func TestLongBodyLineIsRelayed(t *testing.T) {
 	}
 
 	// Longer than go-smtp's default, shorter than ours.
-	body := "Subject: long\r\n\r\n" + strings.Repeat("x", 4000) + "\r\n"
+	body := "From: app@example.test\r\nSubject: long\r\n\r\n" + strings.Repeat("x", 4000) + "\r\n"
 	if err := c.SendMail("app@example.test", []string{"dest@example.test"}, strings.NewReader(body)); err != nil {
 		t.Fatalf("a 4000 byte body line was refused: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestLargeMessageThroughAMilterDoesNotSizeTheHeap(t *testing.T) {
 			runtime.ReadMemStats(&before)
 
 			source := io.MultiReader(
-				strings.NewReader("Subject: big\r\n\r\n"),
+				strings.NewReader("From: app@example.test\r\nSubject: big\r\n\r\n"),
 				io.LimitReader(&lineReader{}, bodySize),
 			)
 			if err := c.SendMail("app@example.test", []string{"dest@example.test"}, source); err != nil {
@@ -356,7 +356,7 @@ func TestReplacedBodyIsSpooled(t *testing.T) {
 		t.Fatalf("AUTH: %v", err)
 	}
 	// Wrapped: a single 11 KB line would exceed the gateway's own line limit.
-	body := "Subject: original\r\n\r\n" + strings.Repeat("x0123456789\r\n", 1000)
+	body := "From: app@example.test\r\nSubject: original\r\n\r\n" + strings.Repeat("x0123456789\r\n", 1000)
 	if err := c.SendMail("app@example.test", []string{"dest@example.test"}, strings.NewReader(body)); err != nil {
 		t.Fatalf("SendMail: %v", err)
 	}

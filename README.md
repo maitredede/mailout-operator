@@ -74,10 +74,18 @@ The decisions worth knowing about:
 - **A filter that is down stops the mail** (`451`, retry later) unless you set
   `failOpen`. A virus scanner that is unreachable must not turn the relay into a
   conduit for malware.
-- **An account may only send from what it declares.** `allowedSenders` lists its
-  addresses or domains, and the policy applies to the envelope *and* to the
-  `From` header the recipient sees. Declare nothing and mail still relays from
-  anywhere — but is never signed.
+- **The gateway's owner decides who may send from what.**
+  `spec.allowedSenders` on the `MailoutGateway` grants addresses or whole
+  domains to namespaces, and nothing an account declares can go beyond its
+  grant. An account may narrow it; an account that declares nothing gets the
+  whole grant. **A gateway that grants nothing sends nothing.**
+
+  This is the authority that used to be missing. An account declared its own
+  senders, so on a gateway holding keys for several tenants nothing stopped one
+  from writing another's domain into its own list and having it signed. The
+  keys belong to the gateway, so the rights to use them have to as well.
+- **The policy applies to the envelope *and* to the `From` header** the
+  recipient sees, so an authorized envelope with a forged header is refused too.
 - **Where a policy applies, a message needs exactly one well-formed `From`.**
   Anything else is refused with a `550`, rather than relayed with the check
   quietly skipped. Every way found around this check worked by leaving nothing
@@ -90,11 +98,9 @@ The decisions worth knowing about:
   a domain, so a key held by the gateway is not authority to use it: without
   this, any account could have any of the gateway's domains signed simply by
   claiming to send from it — one tenant vouching for another. Mind the limit,
-  though: nothing yet checks that the domains an account declares are its own to
-  declare. On a gateway holding keys for several tenants with
-  `allowedAccounts.namespaces: All`, a tenant can still write another's domain
-  into its own `allowedSenders`. Until per-account delegation exists (below),
-  give each tenant its own gateway or restrict `allowedAccounts`.
+  though: two accounts granted the same domain can each be signed for it, so
+  grant a domain that belongs to one tenant with a `namespaceSelector` rather
+  than to everyone.
 - **DKIM signs after the filters**, so the signature covers the body and headers
   the filters actually left behind. Mail from a domain with no key goes out
   unsigned rather than signed under a domain you do not own.
@@ -168,6 +174,10 @@ spec:
   milters:
     - name: clamav
       address: tcp://clamav-milter.security.svc:7357
+  allowedSenders:           # who may send from what; empty means nobody
+    - senders: ["*@example.com"]
+      namespaceSelector:      # omit to grant every namespace this gateway accepts
+        matchLabels: { tenant: billing }
   rateLimit:                # optional; see Quotas below
     store:
       addresses: [valkey.mailout-system.svc:6379]
@@ -375,11 +385,6 @@ tenant's domain signed. A rendered manifest can be perfectly valid and still
 produce a container that will not start.
 
 ## Not there yet
-
-`ReferenceGrant`-style per-account delegation — an account declares the domains
-it sends from, and nothing but the admin's own namespace policy says those
-domains are its own. This is the one gap that still matters for a gateway shared
-between tenants who do not trust each other.
 
 A spool with bounces, for clients that cannot retry.
 

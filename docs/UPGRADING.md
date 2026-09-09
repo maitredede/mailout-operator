@@ -2,6 +2,43 @@
 
 ## To the hardening release
 
+**Read this first: a gateway that grants nothing now sends nothing.**
+`spec.allowedSenders` moves to the `MailoutGateway`, and it is the authority —
+an account can only narrow what its namespace was granted. Until you declare
+grants, the relay accepts connections and refuses every message with `550`.
+
+Nothing was deployed from this repository before this release, so this is a
+migration only if you are running a build of your own. To build the starting
+list from what your accounts use today:
+
+```bash
+kubectl get mailoutaccounts -A -o json | jq -r '
+  .items[] | select(.spec.allowedSenders != null)
+  | .spec.allowedSenders[] as $s | "\(.metadata.namespace)\t\($s)"' | sort -u
+```
+
+Then, on the gateway, grant each set to the namespace it belongs to:
+
+```yaml
+spec:
+  allowedSenders:
+    - senders: ["*@billing.example.com"]
+      namespaceSelector:
+        matchLabels: { kubernetes.io/metadata.name: billing }
+    - senders: ["*@shared.example.com"]   # no selector: every namespace
+```
+
+Why it moved: an account declared its own senders, so on a gateway holding DKIM
+keys for several tenants nothing stopped one from writing another's domain into
+its own `allowedSenders` and having it signed. The keys belong to the gateway,
+so the right to use them has to as well. An account whose declaration is not
+covered by its grant is refused at admission; if the grant is narrowed
+afterwards, the operator drops the uncovered entries and logs which.
+
+One consequence worth knowing: every account now has a policy, so **every
+message needs a `From` header**. There is no longer an "undeclared" account for
+which the check was skipped.
+
 Found by an adversarial review of the previous release. Two of these will refuse
 things your cluster accepted yesterday, so read the first two.
 

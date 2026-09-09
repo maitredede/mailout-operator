@@ -6,6 +6,7 @@ package cluster
 
 import (
 	"crypto/x509"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +89,24 @@ func TestTenantsCannotSignForEachOther(t *testing.T) {
 				{Domain: "victim.test", Selector: "mail",
 					PrivateKeySecretRef: v1alpha1.SecretKeySelector{Name: "dkim-victim.test"}},
 			},
+			// Each domain granted to its own tenant's namespace. This is what
+			// the isolation now rests on: before, an account declared its own
+			// senders, so nothing stopped one tenant writing another's domain
+			// into its list and having it signed.
+			AllowedSenders: []v1alpha1.SenderGrantSpec{
+				{
+					Senders: []string{"*@attacker.test"},
+					NamespaceSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"tenant": "attacker"},
+					},
+				},
+				{
+					Senders: []string{"*@victim.test"},
+					NamespaceSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"tenant": "victim"},
+					},
+				},
+			},
 			Deployment: v1alpha1.DeploymentSpec{Replicas: ptrTo(int32(1))},
 		},
 	}
@@ -96,6 +115,26 @@ func TestTenantsCannotSignForEachOther(t *testing.T) {
 	}
 
 	attackerNS := cl.newNamespace(t, "attacker")
+	labelNamespace(t, c, attackerNS, "tenant", "attacker")
+
+	// An account claiming the other tenant's domain. The admission webhook
+	// refuses this (see the webhook suite), but nothing runs it here — these
+	// reconcilers run in-process — which is exactly why it is worth asserting
+	// the layer underneath: the operator resolves the grant when it renders the
+	// configuration, so an ungranted sender is dropped and the account is
+	// served with nothing it may send.
+	claim := &v1alpha1.MailoutAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: attackerNS},
+		Spec: v1alpha1.MailoutAccountSpec{
+			GatewayRef:     v1alpha1.GatewayReference{Name: "shared"},
+			SecretRef:      v1alpha1.LocalObjectReference{Name: "claim-smtp"},
+			AllowedSenders: []string{"*@victim.test"},
+		},
+	}
+	if err := c.Create(t.Context(), claim); err != nil {
+		t.Fatalf("create the claiming account: %v", err)
+	}
+
 	attacker := &v1alpha1.MailoutAccount{
 		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: attackerNS},
 		Spec: v1alpha1.MailoutAccountSpec{
@@ -127,6 +166,20 @@ func TestTenantsCannotSignForEachOther(t *testing.T) {
 	raw := waitForMailpitMessage(t, cl.MailpitAPIURL, legitimate, time.Minute)
 	if !strings.Contains(raw, "DKIM-Signature:") {
 		t.Fatalf("the account's own domain was not signed:\n%s", raw)
+	}
+
+	// And the account that claimed the victim's domain has nothing granted at
+	// all: it authenticates, and every envelope it offers is refused.
+	claimed := waitForAccountSecret(t, c, attackerNS, "claim-smtp", 2*time.Minute)
+	claimUser := string(claimed.Data[corev1.BasicAuthUsernameKey])
+	claimPass := string(claimed.Data[corev1.BasicAuthPasswordKey])
+	for _, sender := range []string{"ceo@victim.test", "app@attacker.test"} {
+		err := submitAs(t, cl.GatewaySMTPAddr, caPool, claimUser, claimPass,
+			"isolation claimed", sender, sender)
+		if err == nil {
+			t.Errorf("the claiming account sent from %s; dropping an ungranted sender "+
+				"must leave it able to send nothing", sender)
+		}
 	}
 
 	victimLookup := func(name string) ([]string, error) {
@@ -172,5 +225,22 @@ func TestTenantsCannotSignForEachOther(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// labelNamespace puts a label on a namespace, which is what a gateway's sender
+// grants select on.
+func labelNamespace(t *testing.T, c client.Client, name, key, value string) {
+	t.Helper()
+	var ns corev1.Namespace
+	if err := c.Get(t.Context(), client.ObjectKey{Name: name}, &ns); err != nil {
+		t.Fatalf("get namespace %s: %v", name, err)
+	}
+	if ns.Labels == nil {
+		ns.Labels = map[string]string{}
+	}
+	ns.Labels[key] = value
+	if err := c.Update(t.Context(), &ns); err != nil {
+		t.Fatalf("label namespace %s: %v", name, err)
 	}
 }

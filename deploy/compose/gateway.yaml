@@ -31,9 +31,11 @@ accounts:
   # password: demo-password (see deploy/compose/README.md)
   - username: app1
     passwordHash: "$2a$12$C7yTXw50xW.ESgrG6t3Ip.Nm0epgrTWQfX88LiB7PZc/SqmfLmLki"
-    # Declaring the sender is what earns a DKIM signature: a signature vouches
-    # for a domain, so an account only gets one for a domain it may send from.
-    # Leave this out and mail still relays — unsigned.
+    # An account may only send from what is listed here, and only these domains
+    # are signed for it: a signature vouches for a domain, so being allowed to
+    # send there is what earns one. Leave this out and the account sends
+    # nothing — in a cluster the operator fills it in from the gateway's own
+    # spec.allowedSenders, which is where the decision belongs.
     allowedSenders:
       - "*@example.test"
 

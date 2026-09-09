@@ -8,6 +8,7 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"net"
 	"strconv"
 	"strings"
@@ -74,6 +75,12 @@ func (v *GatewayValidator) validate(gw *v1alpha1.MailoutGateway) (admission.Warn
 
 	errs = append(errs, v.validateTLS(gw, spec.Child("tls"))...)
 	errs = append(errs, validateMilters(gw.Spec.Milters, spec.Child("milters"))...)
+	errs = append(errs, validateSenderGrants(gw.Spec.AllowedSenders, spec.Child("allowedSenders"))...)
+	if len(gw.Spec.AllowedSenders) == 0 {
+		warnings = append(warnings, "spec.allowedSenders is empty: no account on this gateway "+
+			"may send anything. Grant at least one sender, or the relay accepts connections and "+
+			"refuses every message")
+	}
 	errs = append(errs, validateDKIM(gw.Spec.DKIM, spec.Child("dkim"))...)
 	errs = append(errs, v.validateListeners(gw, spec.Child("listeners"))...)
 	errs = append(errs, validateRateLimit(gw.Spec.RateLimit, spec.Child("rateLimit"))...)
@@ -342,4 +349,22 @@ func containsFold(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// validateSenderGrants checks the shape of each grant. The wildcard is on the
+// local part only: *@example.com is a whole domain, and there is deliberately
+// no way to write a wildcard domain, so a grant can never widen past domains
+// the gateway's owner named.
+func validateSenderGrants(grants []v1alpha1.SenderGrantSpec, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	for i, grant := range grants {
+		errs = append(errs, validateAllowedSenders(grant.Senders, path.Index(i).Child("senders"))...)
+		if grant.NamespaceSelector != nil {
+			if _, err := metav1.LabelSelectorAsSelector(grant.NamespaceSelector); err != nil {
+				errs = append(errs, field.Invalid(path.Index(i).Child("namespaceSelector"),
+					grant.NamespaceSelector, err.Error()))
+			}
+		}
+	}
+	return errs
 }

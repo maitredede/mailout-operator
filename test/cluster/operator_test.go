@@ -74,8 +74,10 @@ func TestOperatorDeploysAWorkingRelay(t *testing.T) {
 	gw := &v1alpha1.MailoutGateway{
 		ObjectMeta: metav1.ObjectMeta{Name: "relay", Namespace: operatorNamespace},
 		Spec: v1alpha1.MailoutGatewaySpec{
-			Hostname:  gatewayCertName,
-			Listeners: v1alpha1.ListenersSpec{Submission: &v1alpha1.ListenerSpec{}},
+			Hostname: gatewayCertName,
+			// The gateway grants the sending rights; an account can only narrow them.
+			AllowedSenders: []v1alpha1.SenderGrantSpec{{Senders: []string{"*@example.test"}}},
+			Listeners:      v1alpha1.ListenersSpec{Submission: &v1alpha1.ListenerSpec{}},
 			TLS: v1alpha1.GatewayTLSSpec{
 				CertificateRefs: []v1alpha1.LocalObjectReference{{Name: "gateway-tls"}},
 			},

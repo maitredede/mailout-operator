@@ -17,6 +17,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -169,11 +170,34 @@ func (r *GatewayReconciler) collectAccounts(ctx context.Context, gw *v1alpha1.Ma
 			continue
 		}
 
+		// The effective policy is resolved here, so the dataplane receives a
+		// list and never has to know about namespaces or selectors. What the
+		// account asked for can only narrow what its namespace was granted.
+		var nsLabels labels.Set
+		granted, err := grantedSenders(ctx, r.Client, gw, account.Namespace, &nsLabels)
+		if err != nil {
+			return nil, err
+		}
+		senders, refused := gateway.GrantedSubset(granted, account.Spec.AllowedSenders)
+		if len(refused) > 0 {
+			// The webhook refuses this at admission; reaching here means the
+			// grant was narrowed after the account was admitted, or the webhook
+			// was bypassed. Dropping the entries is right — the gateway's owner
+			// decides — but doing it silently would leave an account whose
+			// status says nothing and whose mail is refused.
+			log.Info("account asks for senders its namespace was not granted; dropping them",
+				"account", account.Namespace+"/"+account.Name, "refused", refused)
+		}
+		if len(senders) == 0 {
+			log.Info("account has no sender granted, so it can send nothing",
+				"account", account.Namespace+"/"+account.Name)
+		}
+
 		accounts = append(accounts, render.Account{
 			Username:            UsernameFor(account),
 			PasswordHash:        hash,
 			Disabled:            account.Spec.Disabled,
-			AllowedSenders:      account.Spec.AllowedSenders,
+			AllowedSenders:      senders,
 			SkipHeaderFromCheck: account.Spec.EnforceHeaderFrom != nil && !*account.Spec.EnforceHeaderFrom,
 		})
 	}

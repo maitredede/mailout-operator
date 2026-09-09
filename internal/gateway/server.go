@@ -628,7 +628,9 @@ func (s *session) Data(r io.Reader) error {
 	// The From header is what the recipient sees, so it is checked too: an
 	// envelope that passes while the header is forged still shows a forged
 	// sender, whether or not DMARC alignment catches it downstream.
-	if !policy.skipHeaderFromCheck && !policy.senders.empty() {
+	// Always checked now: an account with nothing granted may send nothing, so
+	// there is no case left where the From header does not matter.
+	if !policy.skipHeaderFromCheck {
 		if err := checkHeaderFrom(msg.Body, policy.senders); err != nil {
 			s.server.log.Warn("From header refused",
 				"account", s.account.Username, "envelope", msg.From, "remote", s.remoteAddr())

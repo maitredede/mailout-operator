@@ -149,7 +149,7 @@ func TestUnreachableStoreRefusesTheMessage(t *testing.T) {
 		t.Fatalf("AUTH: %v", err)
 	}
 	err = c.SendMail("app@example.test", []string{"dest@example.test"},
-		strings.NewReader("Subject: hi\r\n\r\nbody\r\n"))
+		strings.NewReader("From: app@example.test\r\nSubject: hi\r\n\r\nbody\r\n"))
 	if err == nil {
 		t.Fatal("the message was relayed although the quota store is unreachable")
 	}
@@ -175,7 +175,7 @@ func TestNoRateLimitMeansNoStore(t *testing.T) {
 		t.Fatalf("AUTH: %v", err)
 	}
 	if err := c.SendMail("app@example.test", []string{"dest@example.test"},
-		strings.NewReader("Subject: hi\r\n\r\nbody\r\n")); err != nil {
+		strings.NewReader("From: app@example.test\r\nSubject: hi\r\n\r\nbody\r\n")); err != nil {
 		t.Fatalf("SendMail: %v", err)
 	}
 }

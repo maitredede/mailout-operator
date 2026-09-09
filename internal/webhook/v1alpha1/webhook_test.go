@@ -30,6 +30,15 @@ func validGateway(name string, mutate ...func(*v1alpha1.MailoutGateway)) *v1alph
 			Upstream: v1alpha1.UpstreamSpec{
 				Host: "smtp.upstream.test", Port: 587, TLS: v1alpha1.TLSModeStartTLS,
 			},
+			// A gateway that grants nothing lets no account send anything, so a
+			// fixture has to grant something or every account test would fail
+			// on the grant rather than on what it is checking. No selector, so
+			// it applies to every namespace the gateway accepts.
+			AllowedSenders: []v1alpha1.SenderGrantSpec{{
+				Senders: []string{
+					"*@example.test", "*@mail.example.test", "*@other.test", "*@tenant.test",
+				},
+			}},
 		},
 	}
 	for _, m := range mutate {
@@ -493,6 +502,109 @@ func TestAccountUsernameRejectsControlCharacters(t *testing.T) {
 // another's SMTP identity: name it first and the legitimate account is refused,
 // or race it and the winner is decided by list order — alphabetically, so a
 // namespace called aaa- beats one called zzz-.
+// The finding this closes: an account used to declare its own sending rights,
+// so on a gateway holding keys for several tenants nothing stopped one from
+// writing another's domain into its own allowedSenders and having it signed.
+// The grant is the gateway owner's, and a namespaceSelector is what ties a
+// domain to the tenant it belongs to.
+func TestAccountCannotClaimAnotherTenantsGrantedDomain(t *testing.T) {
+	victim := newNamespace(t, "victim")
+	attacker := newNamespace(t, "attacker")
+
+	// Label the namespaces, which is what the grants select on.
+	for ns, tenant := range map[string]string{victim: "victim", attacker: "attacker"} {
+		var namespace corev1.Namespace
+		if err := testClient.Get(t.Context(), types.NamespacedName{Name: ns}, &namespace); err != nil {
+			t.Fatalf("get namespace %s: %v", ns, err)
+		}
+		if namespace.Labels == nil {
+			namespace.Labels = map[string]string{}
+		}
+		namespace.Labels["tenant"] = tenant
+		if err := testClient.Update(t.Context(), &namespace); err != nil {
+			t.Fatalf("label namespace %s: %v", ns, err)
+		}
+	}
+
+	// One gateway, both tenants' domains, each granted to its own namespace.
+	if err := createGateway(t, validGateway("shared", func(gw *v1alpha1.MailoutGateway) {
+		gw.Spec.AllowedSenders = []v1alpha1.SenderGrantSpec{
+			{
+				Senders: []string{"*@victim.test"},
+				NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"tenant": "victim"},
+				},
+			},
+			{
+				Senders: []string{"*@attacker.test"},
+				NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"tenant": "attacker"},
+				},
+			},
+		}
+	})); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+
+	makeAccount := func(ns, name string, senders []string) *v1alpha1.MailoutAccount {
+		return &v1alpha1.MailoutAccount{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: v1alpha1.MailoutAccountSpec{
+				GatewayRef:     v1alpha1.GatewayReference{Name: "shared"},
+				SecretRef:      v1alpha1.LocalObjectReference{Name: name + "-smtp"},
+				AllowedSenders: senders,
+			},
+		}
+	}
+
+	// The attack: the attacker's namespace claiming the victim's domain.
+	err := testClient.Create(t.Context(), makeAccount(attacker, "evil", []string{"*@victim.test"}))
+	if err == nil {
+		t.Fatal("an account claimed a domain granted to another namespace")
+	}
+	if !strings.Contains(err.Error(), "not granted to namespace") {
+		t.Errorf("unexpected refusal: %v", err)
+	}
+
+	// An exact address inside the other tenant's domain is refused too: the
+	// wildcard grant is what would have covered it, and it is not theirs.
+	if err := testClient.Create(t.Context(),
+		makeAccount(attacker, "evil2", []string{"ceo@victim.test"})); err == nil {
+		t.Error("an exact address in another namespace's granted domain was admitted")
+	}
+
+	// Its own domain, on the other hand, is its own.
+	if err := testClient.Create(t.Context(),
+		makeAccount(attacker, "legit", []string{"*@attacker.test"})); err != nil {
+		t.Errorf("an account was refused its own granted domain: %v", err)
+	}
+
+	// And so is the victim's, for the victim.
+	if err := testClient.Create(t.Context(),
+		makeAccount(victim, "app", []string{"noreply@victim.test"})); err != nil {
+		t.Errorf("the victim was refused a subset of its own grant: %v", err)
+	}
+}
+
+// An account that declares nothing gets its namespace's whole grant: the
+// gateway's owner has already decided, and making every tenant restate it would
+// only add a place for the two to disagree.
+func TestAccountWithNoDeclarationIsAdmitted(t *testing.T) {
+	if err := createGateway(t, validGateway("inherit")); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	ns := newNamespace(t, "tenant")
+	if err := testClient.Create(t.Context(), &v1alpha1.MailoutAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: ns},
+		Spec: v1alpha1.MailoutAccountSpec{
+			GatewayRef: v1alpha1.GatewayReference{Name: "inherit"},
+			SecretRef:  v1alpha1.LocalObjectReference{Name: "app-smtp"},
+		},
+	}); err != nil {
+		t.Errorf("an account declaring no sender was refused: %v", err)
+	}
+}
+
 func TestAccountUsernameMustBeNamespaceQualified(t *testing.T) {
 	if err := createGateway(t, validGateway("qualified")); err != nil {
 		t.Fatalf("create gateway: %v", err)
