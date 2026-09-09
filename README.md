@@ -294,11 +294,25 @@ prometheus-operator's CRD is served by the cluster.
 | `mailout_config_reloads_total{result}` | A failed reload keeps the previous configuration; this is the only sign the relay is running on something stale |
 | `mailout_accounts`, `mailout_accounts_rejected` | Accounts served, and accounts dropped because their own settings are unusable |
 
-Anyone who can reach a gateway pod can read that endpoint. It carries no
-credential and no message content, but it does list the accounts served, the
-domains signed and the volume each account sends — enough to map the tenants of
-a shared gateway. To close it, name your scrapers and the operator renders a
-NetworkPolicy:
+The endpoint requires a bearer token. The operator generates one per gateway,
+keeps it across reconciles, puts it in the configuration the pod reads and the
+same value under `metricsToken` in that gateway's configuration Secret — which
+is where the generated `ServiceMonitor` tells Prometheus to look, so scraping
+works with nothing to configure. The token is read on every request, so
+rotating it (delete the key and let the operator regenerate) takes effect on
+the next reload rather than on a restart.
+
+Run the dataplane standalone with no token and the endpoint stays open, which
+is warned about at startup rather than assumed to be deliberate.
+
+The operator's own metrics are a separate endpoint, authenticated and authorized
+against the API server: a scraper presents its ServiceAccount token and is
+checked for `get` on `/metrics`. `kubectl apply -k config/prometheus` adds the
+Service, the `ServiceMonitor` and the ClusterRole to bind to your Prometheus'
+ServiceAccount.
+
+A token says who is reading; it does not say who can reach the port. To close
+that too, name your scrapers and the operator renders a NetworkPolicy:
 
 ```yaml
 spec:

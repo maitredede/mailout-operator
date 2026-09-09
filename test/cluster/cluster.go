@@ -540,7 +540,7 @@ func waitForMailpitMessage(t *testing.T, apiURL, subject string, timeout time.Du
 
 // scrapeMetrics fetches the dataplane's Prometheus endpoint, retrying while
 // kube-proxy programs the node port for the newly ready pod.
-func scrapeMetrics(t *testing.T, url string, timeout time.Duration) string {
+func scrapeMetrics(t *testing.T, url, token string, timeout time.Duration) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
@@ -550,6 +550,9 @@ func scrapeMetrics(t *testing.T, url string, timeout time.Duration) string {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			t.Fatalf("build request: %v", err)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -600,4 +603,32 @@ func nodePortService(gatewayName string) *corev1.Service {
 			}},
 		},
 	}
+}
+
+// scrapeStatus reports what the metrics endpoint answers, without requiring it
+// to succeed — used to check that an unauthenticated scrape is refused.
+func scrapeStatus(t *testing.T, url, token string, timeout time.Duration) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
+	defer cancel()
+
+	for ctx.Err() == nil {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			// The node port may not be programmed yet.
+			time.Sleep(time.Second)
+			continue
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	t.Fatalf("the metrics endpoint at %s never answered within %s", url, timeout)
+	return 0
 }

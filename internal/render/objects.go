@@ -70,6 +70,9 @@ const (
 // ServiceMonitor.
 const (
 	MetricsPortName = "metrics"
+	// MetricsTokenKey is where the config Secret carries the bearer token the
+	// metrics endpoint requires, for the ServiceMonitor to reference.
+	MetricsTokenKey = "metricsToken"
 
 	// SpoolVolumeName is the writable volume holding message bodies in flight.
 	SpoolVolumeName = "spool"
@@ -108,7 +111,15 @@ func SelectorLabels(gatewayName string) map[string]string {
 }
 
 // ConfigSecret is the Secret carrying the rendered configuration.
-func ConfigSecret(gw *v1alpha1.MailoutGateway, rendered []byte) *corev1.Secret {
+func ConfigSecret(gw *v1alpha1.MailoutGateway, rendered []byte, metricsToken string) *corev1.Secret {
+	data := map[string][]byte{ConfigFileName: rendered}
+	if metricsToken != "" {
+		// The same value the configuration carries, under a key of its own.
+		// Prometheus reads a Secret key, not a YAML document, and the
+		// ServiceMonitor points here — so one Secret holds both sides of the
+		// credential rather than two that can drift apart.
+		data[MetricsTokenKey] = []byte(metricsToken)
+	}
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ConfigSecretName(gw.Name),
@@ -116,7 +127,7 @@ func ConfigSecret(gw *v1alpha1.MailoutGateway, rendered []byte) *corev1.Secret {
 			Labels:    Labels(gw.Name),
 		},
 		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{ConfigFileName: rendered},
+		Data: data,
 	}
 }
 
@@ -244,6 +255,21 @@ func ServiceMonitor(gw *v1alpha1.MailoutGateway) *monitoringv1.ServiceMonitor {
 				Port:   MetricsPortName,
 				Path:   MetricsPath,
 				Scheme: "http",
+				// The token the dataplane requires, from the Secret that also
+				// carries its configuration. Plain HTTP: the endpoint is
+				// scraped inside the cluster and carries counters, so a token
+				// that names the reader is what is worth having here — TLS
+				// would mean issuing and rotating a certificate for the
+				// gateway's own metrics port, which cert-manager already does
+				// for the listeners and which nothing here would verify.
+				Authorization: &monitoringv1.SafeAuthorization{
+					Credentials: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: ConfigSecretName(gw.Name),
+						},
+						Key: MetricsTokenKey,
+					},
+				},
 			}},
 		},
 	}

@@ -255,6 +255,17 @@ func (s *snapshot) limiterClient() redis.UniversalClient {
 
 func (s *Server) snapshot() *snapshot { return s.current.Load() }
 
+// MetricsToken is the bearer token the metrics endpoint currently requires, or
+// empty if it requires none. Read through the snapshot so that rotating it is a
+// reload rather than a restart.
+func (s *Server) MetricsToken() string {
+	snap := s.snapshot()
+	if snap == nil {
+		return ""
+	}
+	return snap.config.Metrics.Token
+}
+
 // Run opens every configured listener and serves until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
 	snap := s.snapshot()

@@ -79,6 +79,11 @@ type Input struct {
 	// permission of its own, and no ServiceAccount token is mounted into it
 	// either — see Deployment.
 	RateLimitStore RateLimitCredentials
+
+	// MetricsToken is the bearer token the metrics endpoint will require. The
+	// operator generates it once and keeps it: rotating it on every reconcile
+	// would break whatever is scraping until Prometheus reloaded the Secret.
+	MetricsToken string
 }
 
 // RateLimitCredentials is what the operator resolved for the quota store.
@@ -117,7 +122,8 @@ func GatewayConfig(in Input) (*gateway.Config, error) {
 		// the spool is. Nothing else about Limits is exposed: the defaults are
 		// the ones the pod is sized for, and one more knob is one more thing
 		// that can disagree with the Deployment it is rendered alongside.
-		Limits: gateway.Limits{SpoolDir: SpoolDir},
+		Limits:  gateway.Limits{SpoolDir: SpoolDir},
+		Metrics: gateway.MetricsConfig{Token: in.MetricsToken},
 	}
 	cfg.RateLimit = renderRateLimit(gw.Spec.RateLimit, in.RateLimitStore)
 	// An upstream that signs for us must be left to it: two signatures would

@@ -902,3 +902,46 @@ func TestPullPolicyFor(t *testing.T) {
 		}
 	}
 }
+
+// The token the dataplane requires and the one Prometheus presents must be the
+// same value, and the ServiceMonitor has to say where to find it — otherwise
+// authenticating the endpoint just stops the scrape.
+func TestServiceMonitorCarriesTheMetricsToken(t *testing.T) {
+	gw := testGateway()
+	monitor := ServiceMonitor(gw)
+
+	if len(monitor.Spec.Endpoints) != 1 {
+		t.Fatalf("endpoints = %d, want 1", len(monitor.Spec.Endpoints))
+	}
+	auth := monitor.Spec.Endpoints[0].Authorization
+	if auth == nil || auth.Credentials == nil {
+		t.Fatal("the ServiceMonitor presents no credential, so the scrape would be refused")
+	}
+	if got := auth.Credentials.Name; got != ConfigSecretName(gw.Name) {
+		t.Errorf("credential secret = %q, want the gateway's configuration secret %q",
+			got, ConfigSecretName(gw.Name))
+	}
+	if got := auth.Credentials.Key; got != MetricsTokenKey {
+		t.Errorf("credential key = %q, want %q", got, MetricsTokenKey)
+	}
+}
+
+// One Secret holds both sides of the credential: the token inside the rendered
+// configuration the dataplane reads, and the same value under a key of its own
+// for Prometheus. Two Secrets would be two things that can drift apart.
+func TestConfigSecretCarriesTheTokenForPrometheus(t *testing.T) {
+	gw := testGateway()
+	secret := ConfigSecret(gw, []byte("hostname: mail\n"), "the-token")
+
+	if got := string(secret.Data[MetricsTokenKey]); got != "the-token" {
+		t.Errorf("token key = %q, want the token", got)
+	}
+	if _, found := secret.Data[ConfigFileName]; !found {
+		t.Error("the configuration itself is missing from the secret")
+	}
+	// No token, no key: the standalone dataplane has no operator to generate
+	// one, and an empty key would be a credential that authenticates nothing.
+	if bare := ConfigSecret(gw, []byte("hostname: mail\n"), ""); len(bare.Data) != 1 {
+		t.Errorf("data keys = %v with no token, want only the configuration", bare.Data)
+	}
+}

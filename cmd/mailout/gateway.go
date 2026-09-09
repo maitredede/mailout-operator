@@ -69,7 +69,7 @@ func runGateway(ctx context.Context, configPath, metricsAddr string, log *slog.L
 	// configuration error, and starting the relay half-instrumented would hide
 	// it until someone went looking for a dashboard.
 	group, ctx := errgroup.WithContext(ctx)
-	group.Go(func() error { return gateway.ServeMetrics(ctx, metricsAddr, metrics, log) })
+	group.Go(func() error { return gateway.ServeMetrics(ctx, metricsAddr, metrics, srv.MetricsToken, log) })
 
 	go func() {
 		// A rejected reload leaves the running configuration in place: a bad

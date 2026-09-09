@@ -4,10 +4,12 @@ package gateway
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -246,12 +248,16 @@ func (m *Metrics) configReloaded(result string, served, rejected int) {
 // credential and no message content, only counters, and Prometheus scrapes it
 // from inside the cluster. It is never the SMTP port, so a scrape cannot be
 // confused with a submission.
-func ServeMetrics(ctx context.Context, addr string, m *Metrics, log *slog.Logger) error {
+func ServeMetrics(ctx context.Context, addr string, m *Metrics, token func() string, log *slog.Logger) error {
 	if addr == "" {
 		return nil
 	}
+	if token == nil || token() == "" {
+		log.Warn("metrics endpoint is unauthenticated: anyone who can reach it " +
+			"learns which accounts are served, which domains are signed and how much each sends")
+	}
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", m.Handler())
+	mux.Handle("/metrics", requireBearer(token, m.Handler()))
 	srv := &http.Server{
 		Handler: mux,
 		// A scrape that hangs must not pin a connection forever; Prometheus
@@ -281,4 +287,38 @@ func ServeMetrics(ctx context.Context, addr string, m *Metrics, log *slog.Logger
 		}
 		return err
 	}
+}
+
+// requireBearer gates a handler on a bearer token, read fresh on every request
+// so that rotating it takes effect on the next reload rather than on a restart.
+//
+// No token configured means no gate: the standalone dataplane is a supported
+// entry point and does not have an operator to generate one. That case is
+// warned about at startup rather than left to be discovered.
+func requireBearer(token func() string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		want := ""
+		if token != nil {
+			want = token()
+		}
+		if want == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// The scheme is required, not trimmed if present: TrimPrefix would
+		// accept a bare token too, which is a laxity nobody asked for. RFC 6750
+		// makes the scheme name case-insensitive.
+		scheme, got, found := strings.Cut(r.Header.Get("Authorization"), " ")
+		if !found || !strings.EqualFold(scheme, "Bearer") {
+			got = ""
+		}
+		// Constant time: the comparison is against a secret, and a scraper is
+		// free to retry as often as it likes.
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="mailout metrics"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

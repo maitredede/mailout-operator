@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
@@ -108,8 +109,22 @@ func runOperator(ctx context.Context, opts *operatorOptions) error {
 	log.Info("prometheus-operator detection", "available", prometheusOperatorAvailable)
 
 	options := ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: opts.metricsAddr},
+		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: opts.metricsAddr,
+			// Anyone who could reach this port could read it: the endpoint
+			// reports how many objects of each kind exist and how often each
+			// controller fails, which maps the install. Authenticated and
+			// authorized against the API server, so a scraper presents its
+			// ServiceAccount token and is checked for `get` on /metrics.
+			//
+			// SecureServing puts it on HTTPS with a certificate
+			// controller-runtime generates for itself, so a scraper needs
+			// insecureSkipVerify or a certificate of its own — see the
+			// ServiceMonitor in config/prometheus.
+			SecureServing:  opts.metricsAddr != "0" && opts.metricsAddr != "",
+			FilterProvider: filters.WithAuthenticationAndAuthorization,
+		},
 		HealthProbeBindAddress: opts.probeAddr,
 		LeaderElection:         opts.leaderElect,
 		LeaderElectionID:       "mailout-operator.mailout.daly.nc",

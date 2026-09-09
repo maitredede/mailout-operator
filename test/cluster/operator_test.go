@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -166,7 +167,26 @@ func TestOperatorDeploysAWorkingRelay(t *testing.T) {
 	// real pod, with the flag the operator rendered. And it must have counted
 	// the message that just went through: a metrics port that is open but wired
 	// to nothing looks identical from the outside.
-	metrics := scrapeMetrics(t, cl.MetricsURL, time.Minute)
+	//
+	// The token comes from the same Secret key the ServiceMonitor references,
+	// so this also checks the two halves of the credential match: the operator
+	// generated one value, put it in the configuration the pod reads, and
+	// published it where Prometheus is told to look.
+	var configSecret corev1.Secret
+	if err := c.Get(t.Context(), client.ObjectKey{
+		Namespace: operatorNamespace, Name: render.ConfigSecretName(gw.Name),
+	}, &configSecret); err != nil {
+		t.Fatalf("get the gateway configuration secret: %v", err)
+	}
+	metricsToken := string(configSecret.Data[render.MetricsTokenKey])
+	if metricsToken == "" {
+		t.Fatal("the configuration secret carries no metrics token for Prometheus to present")
+	}
+	if code := scrapeStatus(t, cl.MetricsURL, "", time.Minute); code != http.StatusUnauthorized {
+		t.Errorf("an unauthenticated scrape got %d, want 401: the endpoint lists the accounts "+
+			"served and the domains signed", code)
+	}
+	metrics := scrapeMetrics(t, cl.MetricsURL, metricsToken, time.Minute)
 	wantSeries := fmt.Sprintf("mailout_messages_total{account=%q,result=%q} 1", username, gateway.ResultRelayed)
 	if !strings.Contains(metrics, wantSeries) {
 		t.Errorf("the relayed message was not counted; wanted %s in:\n%s", wantSeries, metrics)

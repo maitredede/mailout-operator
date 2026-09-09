@@ -45,8 +45,9 @@ type Config struct {
 	DKIM []DKIMKey `json:"dkim,omitempty"`
 	// RateLimit caps what each account may send, counted in a store shared by
 	// every replica of the gateway. Absent means no quota at all.
-	RateLimit *RateLimit `json:"rateLimit,omitempty"`
-	Limits    Limits     `json:"limits"`
+	RateLimit *RateLimit    `json:"rateLimit,omitempty"`
+	Limits    Limits        `json:"limits"`
+	Metrics   MetricsConfig `json:"metrics,omitempty"`
 }
 
 // Listener is one socket the gateway accepts submissions on.
@@ -119,6 +120,19 @@ type Account struct {
 	// recipient, DMARC alignment failure notwithstanding.
 	// +optional
 	SkipHeaderFromCheck bool `json:"skipHeaderFromCheck,omitempty"`
+}
+
+// MetricsConfig guards the Prometheus endpoint.
+type MetricsConfig struct {
+	// Token, when set, must be presented as `Authorization: Bearer <token>`.
+	//
+	// The endpoint carries no credential and no message content, but it does
+	// list the accounts served, the domains signed and the volume each account
+	// sends — enough to map the tenants of a shared gateway. In a cluster the
+	// operator generates this and hands the same value to Prometheus; empty
+	// leaves the endpoint open, which is the standalone case, and is logged as
+	// a warning rather than assumed to be deliberate.
+	Token string `json:"token,omitempty"`
 }
 
 // Limits bounds what a session may do. Zero values fall back to defaults.

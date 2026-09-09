@@ -1,0 +1,16 @@
+# The endpoint authorizes its readers against the API server, so a scraper needs
+# `get` on the non-resource URL /metrics. Bind this to whatever ServiceAccount
+# your Prometheus runs as:
+#
+#   kubectl create clusterrolebinding mailout-metrics-reader \
+#     --clusterrole=mailout-metrics-reader \
+#     --serviceaccount=monitoring:prometheus
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mailout-metrics-reader
+rules:
+  - nonResourceURLs:
+      - /metrics
+    verbs:
+      - get

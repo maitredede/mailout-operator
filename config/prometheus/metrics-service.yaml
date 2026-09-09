@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailout-operator-metrics
+  namespace: mailout-system
+  labels:
+    app.kubernetes.io/name: mailout
+    app.kubernetes.io/component: operator-metrics
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mailout
+    app.kubernetes.io/component: operator
+  ports:
+    - name: https
+      port: 8080
+      targetPort: metrics
+      protocol: TCP

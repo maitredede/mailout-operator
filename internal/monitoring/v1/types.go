@@ -13,6 +13,7 @@
 package v1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
@@ -41,6 +42,19 @@ type Endpoint struct {
 	// gateway has a reason to differ.
 	// +optional
 	Interval string `json:"interval,omitempty"`
+	// Authorization is the credential Prometheus presents. Only the safe form
+	// is modelled: the secret is named, never inlined.
+	// +optional
+	Authorization *SafeAuthorization `json:"authorization,omitempty"`
+}
+
+// SafeAuthorization is an Authorization header built from a Secret key.
+type SafeAuthorization struct {
+	// Type defaults to Bearer on the prometheus-operator side.
+	// +optional
+	Type string `json:"type,omitempty"`
+	// +optional
+	Credentials *corev1.SecretKeySelector `json:"credentials,omitempty"`
 }
 
 // NamespaceSelector restricts which namespaces the Service may live in.

@@ -64,6 +64,10 @@ type GatewayReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
+// The metrics endpoint authenticates and authorizes its readers against the API
+// server, which is what these two allow it to ask.
+// +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
+// +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 
@@ -92,6 +96,15 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.resolveSecrets(ctx, &gw, &input); err != nil {
 		return ctrl.Result{}, r.markFailed(ctx, &gw, v1alpha1.ReasonSecretMissing, err.Error())
 	}
+
+	// Read before rendering: the token goes inside the configuration, and it has
+	// to be the one already in service or every scrape would start failing on
+	// each reconcile.
+	token, err := r.metricsToken(ctx, &gw)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	input.MetricsToken = token
 
 	cfg, err := render.GatewayConfig(input)
 	if err != nil {
@@ -317,6 +330,30 @@ func (r *GatewayReconciler) reconcileCertificate(ctx context.Context, gw *v1alph
 	return nil
 }
 
+// metricsToken returns the gateway's bearer token, generating one the first
+// time.
+//
+// Kept across reconciles like the accounts' passwords are: a token that changed
+// on every pass would leave Prometheus unauthorized until it reloaded the
+// Secret, which is a scrape gap for no reason.
+func (r *GatewayReconciler) metricsToken(ctx context.Context, gw *v1alpha1.MailoutGateway) (string, error) {
+	var secret corev1.Secret
+	key := client.ObjectKey{Namespace: gw.Namespace, Name: render.ConfigSecretName(gw.Name)}
+	switch err := r.Get(ctx, key, &secret); {
+	case err == nil:
+		if token := string(secret.Data[render.MetricsTokenKey]); token != "" {
+			return token, nil
+		}
+	case !apierrors.IsNotFound(err):
+		return "", fmt.Errorf("get configuration secret %s: %w", key, err)
+	}
+	token, err := gateway.GeneratePassword()
+	if err != nil {
+		return "", fmt.Errorf("generate metrics token: %w", err)
+	}
+	return token, nil
+}
+
 func (r *GatewayReconciler) reconcileConfigSecret(ctx context.Context, gw *v1alpha1.MailoutGateway, cfg *gateway.Config) error {
 	log := logf.FromContext(ctx)
 	// Enforced before the write, not discovered after it: a Secret over 1 MiB
@@ -332,7 +369,7 @@ func (r *GatewayReconciler) reconcileConfigSecret(ctx context.Context, gw *v1alp
 	if err != nil {
 		return fmt.Errorf("marshal configuration: %w", err)
 	}
-	desired := render.ConfigSecret(gw, rendered)
+	desired := render.ConfigSecret(gw, rendered, cfg.Metrics.Token)
 
 	secret := &corev1.Secret{}
 	secret.Name = desired.Name

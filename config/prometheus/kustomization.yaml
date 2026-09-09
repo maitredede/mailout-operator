@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Scraping the operator's own metrics:
+#
+#   kubectl apply -k config/prometheus
+#
+# Not part of config/default, for the same reason the Grafana dashboard is not:
+# it needs prometheus-operator's CRD, and it names the ServiceAccount whose
+# token Prometheus will present. Neither can be detected from here.
+#
+# The gateways' metrics are a separate matter: the operator creates one Service
+# and one ServiceMonitor per gateway by itself.
+
+namespace: mailout-system
+
+resources:
+  - metrics-service.yaml
+  - metrics-reader-role.yaml
+  - servicemonitor.yaml

@@ -120,6 +120,24 @@ keep in memory. Nothing to do — but if you deploy the dataplane yourself, note
 that it refuses to start when that path is not writable, rather than failing on
 the first large message. Set `limits.spoolDir` to a writable directory.
 
+**The metrics endpoints now authenticate.** The gateways' endpoint requires a
+bearer token, generated per gateway and published in that gateway's
+configuration Secret under `metricsToken`; the `ServiceMonitor` the operator
+creates already presents it, so a Prometheus scraping through it needs no
+change. Anything scraping port 9090 directly gets `401` until it sends
+`Authorization: Bearer <token>`.
+
+The operator's own endpoint moves to HTTPS and checks the reader against the API
+server. It has no Service in `config/default`, so nothing was scraping it
+before; `kubectl apply -k config/prometheus` sets that up, and its ClusterRole
+has to be bound to your Prometheus' ServiceAccount:
+
+```bash
+kubectl create clusterrolebinding mailout-metrics-reader \
+  --clusterrole=mailout-metrics-reader \
+  --serviceaccount=monitoring:prometheus
+```
+
 **A message needs exactly one `From` header — but only for accounts that
 declare `allowedSenders`.** Two `From` headers, `From :` with a space before the
 colon, or a header block with no blank line are now `550`s. They used to relay

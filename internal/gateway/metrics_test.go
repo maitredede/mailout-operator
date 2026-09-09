@@ -228,7 +228,7 @@ func TestServeMetricsExposesTheRegistry(t *testing.T) {
 
 	ctx := t.Context()
 	done := make(chan error, 1)
-	go func() { done <- ServeMetrics(ctx, addr, m, testLogger()) }()
+	go func() { done <- ServeMetrics(ctx, addr, m, nil, testLogger()) }()
 
 	body := getWithRetry(t, "http://"+addr+"/metrics")
 	if !strings.Contains(body, `mailout_messages_total{account="app1",result="relayed"} 1`) {
@@ -244,7 +244,7 @@ func TestServeMetricsExposesTheRegistry(t *testing.T) {
 func TestServeMetricsDisabledByAnEmptyAddress(t *testing.T) {
 	// Nothing to cancel: an empty address must return immediately rather than
 	// block until shutdown.
-	if err := ServeMetrics(context.Background(), "", NewMetrics(), testLogger()); err != nil {
+	if err := ServeMetrics(context.Background(), "", NewMetrics(), nil, testLogger()); err != nil {
 		t.Fatalf("ServeMetrics with no address: %v", err)
 	}
 }
@@ -337,4 +337,142 @@ func exposedMetricNames(t *testing.T) map[string]bool {
 		}
 	}
 	return names
+}
+
+// The endpoint lists the accounts served, the domains signed and the volume
+// each account sends: enough to map the tenants of a shared gateway. In a
+// cluster the operator generates the token and hands the same value to
+// Prometheus.
+func TestMetricsEndpointRequiresItsToken(t *testing.T) {
+	const token = "s3cret-token"
+	m := NewMetrics()
+	m.messageHandled("app1", ResultRelayed)
+
+	addr := freeAddr(t)
+	ctx := t.Context()
+	done := make(chan error, 1)
+	go func() { done <- ServeMetrics(ctx, addr, m, func() string { return token }, testLogger()) }()
+
+	url := "http://" + addr + "/metrics"
+	waitForListener(t, url)
+
+	for name, tc := range map[string]struct {
+		header string
+		want   int
+	}{
+		"no header":      {"", http.StatusUnauthorized},
+		"wrong token":    {"Bearer wrong", http.StatusUnauthorized},
+		"missing prefix": {token, http.StatusUnauthorized},
+		"right token":    {"Bearer " + token, http.StatusOK},
+	} {
+		t.Run(name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.want)
+			}
+			if resp.StatusCode == http.StatusUnauthorized &&
+				resp.Header.Get("WWW-Authenticate") == "" {
+				t.Error("a 401 without WWW-Authenticate leaves a scraper guessing what to present")
+			}
+		})
+	}
+}
+
+// The token is read on every request, so rotating it is a reload rather than a
+// restart of the pod.
+func TestMetricsTokenIsReadPerRequest(t *testing.T) {
+	m := NewMetrics()
+	current := "first"
+	addr := freeAddr(t)
+	go func() { _ = ServeMetrics(t.Context(), addr, m, func() string { return current }, testLogger()) }()
+
+	url := "http://" + addr + "/metrics"
+	waitForListener(t, url)
+
+	if code := getWithToken(t, url, "first"); code != http.StatusOK {
+		t.Fatalf("the first token was refused: %d", code)
+	}
+	current = "second"
+	if code := getWithToken(t, url, "first"); code != http.StatusUnauthorized {
+		t.Errorf("the old token still works after rotation: %d", code)
+	}
+	if code := getWithToken(t, url, "second"); code != http.StatusOK {
+		t.Errorf("the new token was refused: %d", code)
+	}
+}
+
+// And the standalone case: no token means no gate, warned about at startup.
+func TestMetricsWithoutATokenStaysOpen(t *testing.T) {
+	m := NewMetrics()
+	addr := freeAddr(t)
+	go func() { _ = ServeMetrics(t.Context(), addr, m, func() string { return "" }, testLogger()) }()
+
+	url := "http://" + addr + "/metrics"
+	waitForListener(t, url)
+	if code := getWithToken(t, url, ""); code != http.StatusOK {
+		t.Errorf("status = %d with no token configured, want 200", code)
+	}
+}
+
+func getWithToken(t *testing.T, url, token string) int {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// freeAddr picks an address the server can bind. ServeMetrics opens the
+// listener itself, so the port has to be released first.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close()
+	return addr
+}
+
+// waitForListener polls until the server answers anything at all.
+func waitForListener(t *testing.T, url string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			return
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("the metrics server never came up: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

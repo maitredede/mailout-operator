@@ -1,0 +1,24 @@
+# The endpoint is HTTPS with a certificate controller-runtime generates for
+# itself, so there is nothing for a scraper to verify it against —
+# insecureSkipVerify is the honest setting rather than a shortcut. What protects
+# the endpoint is the bearer token below and the authorization check behind it,
+# not the certificate.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mailout-operator
+  namespace: mailout-system
+  labels:
+    app.kubernetes.io/name: mailout
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mailout
+      app.kubernetes.io/component: operator-metrics
+  endpoints:
+    - port: https
+      path: /metrics
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true
