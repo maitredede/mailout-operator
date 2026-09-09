@@ -1,0 +1,50 @@
+# Image mailout -> registre Zot interne (dkr.daly.nc), via bake multi-arch natif
+# sur les daemons BuildKit du cluster.
+#
+# Workflows réutilisables épinglés par SHA (politique de pin : README de maitredede/ci).
+name: Images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Les permissions du job appelé sont déclarées sur le job `images` lui-même.
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  images:
+    uses: maitredede/ci/.github/workflows/bake-images.yml@f7c8befa0a4216b1923b902321b6018b97537acf # main 2026-09-07 (gofmt hors submodules)
+    permissions:
+      contents: read
+      # cosign keyless.
+      id-token: write
+    with:
+      runner: arc-runner-mailout-operator
+      registry: dkr.daly.nc/mailout
+      bake-file: docker-bake.hcl
+      targets: default
+      # Les deux architectures, et c'est le point : le cluster est trois workers
+      # arm64 et un amd64, et l'opérateur tourne deux replicas avec une
+      # anti-affinité seulement preferred. Une image mono-arch obligerait à
+      # épingler le Deployment sur une architecture — ou à laisser un replica
+      # boucler sur « exec format error ».
+      platforms: linux/amd64,linux/arm64
+      # Ni docs/ ni test/ n'entrent dans le contexte de build (.dockerignore), et
+      # config/ comme deploy/ n'influencent pas le binaire compilé : l'image
+      # finale ne contient que lui. Jamais appliqué à un tag (cf. bake-images) :
+      # un v* posé sur un commit de manifestes doit tout de même publier ses
+      # images semver.
+      skip-paths-regexp: "^(config|deploy|docs)/"
+      cosign: true
+      trivy: true
+      sbom: true
+    secrets:
+      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}

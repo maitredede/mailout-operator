@@ -374,6 +374,32 @@ make compose-up     # gateway + Mailpit + ClamAV, with throwaway certificates
 See [deploy/compose/README.md](deploy/compose/README.md) for what to send and
 what to look at.
 
+## Images
+
+One image, both roles: the operator hands its own image to every gateway it
+deploys, so there is nothing to keep in step.
+
+CI publishes it multi-arch — `linux/amd64` and `linux/arm64` — with one native
+BuildKit daemon per architecture rather than emulation. That is not a
+nicety: a cluster with workers of both architectures and an operator running two
+replicas would otherwise need its Deployment pinned to one architecture, or
+leave a replica looping on `exec format error`.
+
+```bash
+docker buildx bake --push               # both platforms, needs a multi-node builder
+TAG=$(git describe --tags --always) docker buildx bake --push
+make docker-build IMG=…                 # one platform, for a local cluster
+mailout version                          # what a running pod is
+```
+
+Base images are pinned by digest, and both digests are OCI indexes so the build
+stays multi-arch. To bump one, take the index digest — never a per-platform
+manifest digest, which would pin a single architecture:
+
+```bash
+docker buildx imagetools inspect golang:1.27-alpine
+```
+
 ## Development
 
 ```bash

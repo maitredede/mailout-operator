@@ -32,7 +32,10 @@ build:
 
 .PHONY: docker-build
 docker-build:
-	docker build -t $(IMG) .
+	# VERSION reaches main.version, so `mailout version` in the built image says
+	# what it is rather than "dev". One platform only — the host's: for both, use
+	# `docker buildx bake --push`, which needs a builder that can produce them.
+	docker build --build-arg VERSION=$(shell git describe --tags --always --dirty) -t $(IMG) .
 
 ## --- test ------------------------------------------------------------------
 
