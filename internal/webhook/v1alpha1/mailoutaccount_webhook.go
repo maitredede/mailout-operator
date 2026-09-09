@@ -166,9 +166,15 @@ func (v *AccountValidator) validateAgainstGateway(ctx context.Context, account *
 			continue
 		}
 		if controller.UsernameFor(other) == username {
+			// Deliberately does not name the holder. This message reaches
+			// whoever ran kubectl apply, and it used to say which
+			// namespace/name already had the username — which let a tenant map
+			// the other tenants of a shared gateway by guessing names. The
+			// namespace prefix means a conflict can now only come from the
+			// caller's own namespace, so they can find it themselves; the
+			// operator logs the pair for an admin who cannot.
 			errs = append(errs, field.Duplicate(spec.Child("username"),
-				fmt.Sprintf("%s is already used by MailoutAccount %s/%s on this gateway",
-					username, other.Namespace, other.Name)))
+				fmt.Sprintf("%s is already taken on this gateway", username)))
 			break
 		}
 	}

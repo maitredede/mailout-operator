@@ -119,11 +119,6 @@ type Account struct {
 	// recipient, DMARC alignment failure notwithstanding.
 	// +optional
 	SkipHeaderFromCheck bool `json:"skipHeaderFromCheck,omitempty"`
-	// DisableMilters names gateway filters to skip for this account, by name.
-	// Filters can only be switched off, never added: an account must not be
-	// able to route its mail through a filter of its own choosing.
-	// +optional
-	DisableMilters []string `json:"disableMilters,omitempty"`
 }
 
 // Limits bounds what a session may do. Zero values fall back to defaults.

@@ -75,8 +75,13 @@ func (r *AccountReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if conflict, err := r.usernameConflict(ctx, &account, &gw, username); err != nil {
 		return ctrl.Result{}, err
 	} else if conflict != "" {
+		// The status is readable by the tenant, so it says what is wrong
+		// without naming the holder; the log, which is the operator's, says
+		// which one it is.
+		log.Info("username conflict", "account", account.Namespace+"/"+account.Name,
+			"username", username, "heldBy", conflict)
 		return r.markNotAccepted(ctx, &account, v1alpha1.ReasonUsernameConflict,
-			fmt.Sprintf("username %q is already used by MailoutAccount %s", username, conflict))
+			fmt.Sprintf("username %q is already taken on this gateway", username))
 	}
 
 	if err := r.reconcileSecret(ctx, &account, &gw, username); err != nil {

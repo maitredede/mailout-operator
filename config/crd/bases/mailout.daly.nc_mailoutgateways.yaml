@@ -1260,6 +1260,134 @@ spec:
                         type: integer
                     type: object
                 type: object
+              metrics:
+                description: Metrics restricts who may read the dataplane's Prometheus
+                  endpoint.
+                properties:
+                  allowedScrapers:
+                    description: |-
+                      AllowedScrapers, when set, makes the operator render a NetworkPolicy for
+                      the gateway's pods: the metrics port is reachable only from these peers,
+                      and the SMTP ports stay reachable from anywhere.
+
+                      That second half is not a courtesy, it is the point. Attaching any
+                      NetworkPolicy to a pod switches it to deny-by-default for ingress, so a
+                      policy that named only the metrics port would silently stop all mail.
+                      The rendered policy always opens the listeners.
+
+                      Left empty, no NetworkPolicy is rendered and the endpoint stays reachable
+                      from anywhere in the cluster. It carries no credential and no message
+                      content, but it does list the accounts served, the domains signed and the
+                      volume each account sends — enough to map the tenants of a shared
+                      gateway.
+
+                      A NetworkPolicy on a cluster whose CNI does not enforce them is a silent
+                      no-op, which is worse than nothing because it looks like protection.
+                    items:
+                      description: |-
+                        NetworkPeer selects where traffic may come from. At least one of the two
+                        selectors must be set; an empty selector matches everything in its
+                        dimension, which is how Kubernetes NetworkPolicy peers already work.
+                      properties:
+                        namespaceSelector:
+                          description: |-
+                            NamespaceSelector matches the namespaces the scraper may run in. Empty
+                            with a podSelector set means the gateway's own namespace.
+                          properties:
+                            matchExpressions:
+                              description: matchExpressions is a list of label selector
+                                requirements. The requirements are ANDed.
+                              items:
+                                description: |-
+                                  A label selector requirement is a selector that contains values, a key, and an operator that
+                                  relates the key and values.
+                                properties:
+                                  key:
+                                    description: key is the label key that the selector
+                                      applies to.
+                                    type: string
+                                  operator:
+                                    description: |-
+                                      operator represents a key's relationship to a set of values.
+                                      Valid operators are In, NotIn, Exists and DoesNotExist.
+                                    type: string
+                                  values:
+                                    description: |-
+                                      values is an array of string values. If the operator is In or NotIn,
+                                      the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                      the values array must be empty. This array is replaced during a strategic
+                                      merge patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            matchLabels:
+                              additionalProperties:
+                                type: string
+                              description: |-
+                                matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                operator is "In", and the values array contains only "value". The requirements are ANDed.
+                              type: object
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        podSelector:
+                          description: |-
+                            PodSelector matches the scraper's pods. Empty means every pod in the
+                            selected namespaces.
+                          properties:
+                            matchExpressions:
+                              description: matchExpressions is a list of label selector
+                                requirements. The requirements are ANDed.
+                              items:
+                                description: |-
+                                  A label selector requirement is a selector that contains values, a key, and an operator that
+                                  relates the key and values.
+                                properties:
+                                  key:
+                                    description: key is the label key that the selector
+                                      applies to.
+                                    type: string
+                                  operator:
+                                    description: |-
+                                      operator represents a key's relationship to a set of values.
+                                      Valid operators are In, NotIn, Exists and DoesNotExist.
+                                    type: string
+                                  values:
+                                    description: |-
+                                      values is an array of string values. If the operator is In or NotIn,
+                                      the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                      the values array must be empty. This array is replaced during a strategic
+                                      merge patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            matchLabels:
+                              additionalProperties:
+                                type: string
+                              description: |-
+                                matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                operator is "In", and the values array contains only "value". The requirements are ANDed.
+                              type: object
+                          type: object
+                          x-kubernetes-map-type: atomic
+                      type: object
+                    type: array
+                type: object
               milters:
                 items:
                   description: |-

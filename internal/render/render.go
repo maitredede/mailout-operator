@@ -59,8 +59,6 @@ type Account struct {
 	AllowedSenders []string
 	// SkipHeaderFromCheck limits the sender policy to the envelope.
 	SkipHeaderFromCheck bool
-	// DisableMilters names gateway filters this account opts out of.
-	DisableMilters []string
 }
 
 // Input is everything needed to render a gateway's configuration, already read
@@ -137,7 +135,6 @@ func GatewayConfig(in Input) (*gateway.Config, error) {
 			Disabled:            acct.Disabled,
 			AllowedSenders:      acct.AllowedSenders,
 			SkipHeaderFromCheck: acct.SkipHeaderFromCheck,
-			DisableMilters:      acct.DisableMilters,
 		})
 	}
 	return cfg, nil

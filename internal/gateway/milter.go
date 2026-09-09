@@ -118,25 +118,6 @@ func newMilterChain(cfg *Config, log *slog.Logger, metrics *Metrics) (*milterCha
 // empty reports whether there is nothing to run.
 func (c *milterChain) empty() bool { return len(c.filters) == 0 }
 
-// without returns a chain with the named filters removed, sharing the same
-// clients. Used for an account that opts out of one of the gateway's filters.
-func (c *milterChain) without(names []string) *milterChain {
-	if len(names) == 0 {
-		return c
-	}
-	excluded := make(map[string]bool, len(names))
-	for _, n := range names {
-		excluded[n] = true
-	}
-	filtered := &milterChain{log: c.log, metrics: c.metrics}
-	for _, f := range c.filters {
-		if !excluded[f.cfg.Name] {
-			filtered.filters = append(filtered.filters, f)
-		}
-	}
-	return filtered
-}
-
 // run passes the message through every filter, applying each one's
 // modifications before handing it to the next. A rejection is returned as an
 // *smtp.SMTPError carrying the filter's own status code, so the submitting

@@ -15,20 +15,6 @@ type GatewayReference struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
-// AccountMiltersSpec adjusts the gateway's filter chain for this account.
-// Filters can only be switched off, never added: an account must not be able to
-// route its mail through a filter of its choosing.
-type AccountMiltersSpec struct {
-	// Disable names gateway filters to skip for this account, by their
-	// spec.milters[].name. A filter name is a DNS label, and there cannot be
-	// more of them than the gateway declares — the bounds are there so this
-	// field cannot be used to inflate the shared configuration Secret.
-	// +kubebuilder:validation:MaxItems=32
-	// +kubebuilder:validation:items:MaxLength=63
-	// +optional
-	Disable []string `json:"disable,omitempty"`
-}
-
 // MailoutAccountSpec is one application's SMTP credentials. The operator
 // generates the password, writes it to a Secret in this namespace, and keeps
 // only its bcrypt hash — nothing but that Secret ever holds the cleartext.
@@ -92,9 +78,6 @@ type MailoutAccountSpec struct {
 	// +kubebuilder:default=true
 	// +optional
 	EnforceHeaderFrom *bool `json:"enforceHeaderFrom,omitempty"`
-
-	// +optional
-	Milters AccountMiltersSpec `json:"milters,omitempty"`
 
 	// Disabled keeps the account and its Secret but refuses authentication.
 	// +optional

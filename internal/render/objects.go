@@ -6,6 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	networkingv1 "k8s.io/api/networking/v1"
+	"net"
+	"strconv"
 	"strings"
 
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
@@ -489,4 +492,74 @@ func accountSecretLabels(account *v1alpha1.MailoutAccount, gatewayNamespace stri
 		LabelGatewayName:      account.Spec.GatewayRef.Name,
 		LabelGatewayNamespace: gatewayNamespace,
 	}
+}
+
+// MetricsNetworkPolicyName is the policy restricting the metrics endpoint.
+func MetricsNetworkPolicyName(gatewayName string) string { return gatewayName + "-metrics" }
+
+// MetricsNetworkPolicy restricts the metrics port to the declared scrapers
+// while leaving the SMTP listeners reachable from anywhere. It returns nil when
+// no scraper is declared, because rendering a policy is not free: attaching one
+// to a pod switches it to deny-by-default for ingress.
+//
+// The SMTP rule is what keeps this from being an outage. A policy naming only
+// the metrics port would deny 587 and 465 along with everything else, and mail
+// would stop for every tenant of the gateway — with nothing in the gateway's
+// own logs to say why, because the connections never arrive.
+func MetricsNetworkPolicy(gw *v1alpha1.MailoutGateway, cfg *gateway.Config) *networkingv1.NetworkPolicy {
+	if len(gw.Spec.Metrics.AllowedScrapers) == 0 {
+		return nil
+	}
+
+	tcp := corev1.ProtocolTCP
+	var smtpPorts []networkingv1.NetworkPolicyPort
+	for _, l := range cfg.Listeners {
+		port := intstr.FromInt32(listenerPortOf(l))
+		smtpPorts = append(smtpPorts, networkingv1.NetworkPolicyPort{Protocol: &tcp, Port: &port})
+	}
+	metricsPort := intstr.FromInt32(MetricsPort)
+
+	peers := make([]networkingv1.NetworkPolicyPeer, 0, len(gw.Spec.Metrics.AllowedScrapers))
+	for _, scraper := range gw.Spec.Metrics.AllowedScrapers {
+		peers = append(peers, networkingv1.NetworkPolicyPeer{
+			NamespaceSelector: scraper.NamespaceSelector,
+			PodSelector:       scraper.PodSelector,
+		})
+	}
+
+	rules := []networkingv1.NetworkPolicyIngressRule{{
+		// From is empty on purpose: every source. Submission comes from
+		// applications anywhere in the cluster, and the relay authenticates
+		// them rather than placing them.
+		Ports: smtpPorts,
+	}, {
+		Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &metricsPort}},
+		From:  peers,
+	}}
+
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      MetricsNetworkPolicyName(gw.Name),
+			Namespace: gw.Namespace,
+			Labels:    Labels(gw.Name),
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: SelectorLabels(gw.Name)},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress:     rules,
+		},
+	}
+}
+
+// listenerPortOf reads the port out of a rendered listener address.
+func listenerPortOf(l gateway.Listener) int32 {
+	_, port, err := net.SplitHostPort(l.Addr)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return 0
+	}
+	return int32(n) //nolint:gosec // a port fits in int32 by construction
 }

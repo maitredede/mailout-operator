@@ -6,6 +6,7 @@ package v1alpha1
 
 import (
 	"fmt"
+	"k8s.io/apimachinery/pkg/types"
 	"strings"
 	"testing"
 
@@ -311,8 +312,13 @@ func TestAccountRefusedOnUsernameConflict(t *testing.T) {
 	if err == nil {
 		t.Fatal("a duplicate username was admitted")
 	}
-	if !strings.Contains(err.Error(), "already used by") {
+	if !strings.Contains(err.Error(), "already taken") {
 		t.Fatalf("unexpected message: %v", err)
+	}
+	// The message must not name the holder: it reaches whoever ran kubectl
+	// apply, and naming the other account is how a tenant maps the others.
+	if strings.Contains(err.Error(), "/a") {
+		t.Errorf("the refusal names the account holding the username: %v", err)
 	}
 }
 
@@ -600,6 +606,41 @@ func alphanumeric(r rune) rune {
 		return r
 	default:
 		return -1
+	}
+}
+
+// spec.milters.disable is gone, and a residual one is pruned rather than
+// honoured. A tenant used it to skip the gateway's virus scanner: the filters
+// belong to whoever owns the gateway, and an account that needs different ones
+// belongs on a different gateway.
+func TestAccountMiltersFieldIsPruned(t *testing.T) {
+	if err := createGateway(t, validGateway("prunemilters")); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	ns := newNamespace(t, "tenant")
+
+	account := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "mailout.daly.nc/v1alpha1",
+		"kind":       "MailoutAccount",
+		"metadata":   map[string]any{"name": "opt-out", "namespace": ns},
+		"spec": map[string]any{
+			"gatewayRef": map[string]any{"name": "prunemilters"},
+			"secretRef":  map[string]any{"name": "opt-out-smtp"},
+			"milters":    map[string]any{"disable": []any{"clamav"}},
+		},
+	}}
+	if err := testClient.Create(t.Context(), account); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	var stored unstructured.Unstructured
+	stored.SetGroupVersionKind(account.GroupVersionKind())
+	if err := testClient.Get(t.Context(),
+		types.NamespacedName{Namespace: ns, Name: "opt-out"}, &stored); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if _, found, _ := unstructured.NestedMap(stored.Object, "spec", "milters"); found {
+		t.Error("spec.milters survived, so an account could still ask to skip a filter")
 	}
 }
 

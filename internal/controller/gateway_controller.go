@@ -14,6 +14,7 @@ import (
 	"github.com/maitredede/mailout-operator/internal/render"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -62,6 +63,7 @@ type GatewayReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile brings one gateway to its desired state.
@@ -109,7 +111,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.reconcileService(ctx, &gw, cfg); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.reconcileMetrics(ctx, &gw); err != nil {
+	if err := r.reconcileMetrics(ctx, &gw, cfg); err != nil {
 		return ctrl.Result{}, err
 	}
 	deployment, err := r.reconcileDeployment(ctx, &gw, cfg, accounts)
@@ -173,7 +175,6 @@ func (r *GatewayReconciler) collectAccounts(ctx context.Context, gw *v1alpha1.Ma
 			Disabled:            account.Spec.Disabled,
 			AllowedSenders:      account.Spec.AllowedSenders,
 			SkipHeaderFromCheck: account.Spec.EnforceHeaderFrom != nil && !*account.Spec.EnforceHeaderFrom,
-			DisableMilters:      account.Spec.Milters.Disable,
 		})
 	}
 	return accounts, nil
@@ -349,7 +350,8 @@ func (r *GatewayReconciler) reconcileService(ctx context.Context, gw *v1alpha1.M
 // reconcileMetrics keeps the Prometheus Service, and the ServiceMonitor when
 // the cluster can act on one. A cluster without prometheus-operator still gets
 // the Service: it costs nothing, and it is what any other scraper points at.
-func (r *GatewayReconciler) reconcileMetrics(ctx context.Context, gw *v1alpha1.MailoutGateway) error {
+func (r *GatewayReconciler) reconcileMetrics(ctx context.Context, gw *v1alpha1.MailoutGateway,
+	cfg *gateway.Config) error {
 	desired := render.MetricsService(gw)
 	svc := &corev1.Service{}
 	svc.Name = desired.Name
@@ -367,6 +369,10 @@ func (r *GatewayReconciler) reconcileMetrics(ctx context.Context, gw *v1alpha1.M
 		return fmt.Errorf("reconcile metrics service: %w", err)
 	}
 
+	if err := r.reconcileMetricsNetworkPolicy(ctx, gw, cfg); err != nil {
+		return err
+	}
+
 	if !r.PrometheusOperatorAvailable {
 		return nil
 	}
@@ -381,6 +387,37 @@ func (r *GatewayReconciler) reconcileMetrics(ctx context.Context, gw *v1alpha1.M
 	})
 	if err != nil {
 		return fmt.Errorf("reconcile service monitor: %w", err)
+	}
+	return nil
+}
+
+// reconcileMetricsNetworkPolicy applies the policy when scrapers are declared,
+// and removes it when they stop being. Removal matters: a policy left behind
+// after the field is cleared would keep denying whatever it denied, and the
+// admin who cleared the field would have no reason to look for it.
+func (r *GatewayReconciler) reconcileMetricsNetworkPolicy(ctx context.Context,
+	gw *v1alpha1.MailoutGateway, cfg *gateway.Config) error {
+	desired := render.MetricsNetworkPolicy(gw, cfg)
+	if desired == nil {
+		stale := &networkingv1.NetworkPolicy{}
+		stale.Name = render.MetricsNetworkPolicyName(gw.Name)
+		stale.Namespace = gw.Namespace
+		if err := r.Delete(ctx, stale); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("remove metrics network policy: %w", err)
+		}
+		return nil
+	}
+
+	policy := &networkingv1.NetworkPolicy{}
+	policy.Name = desired.Name
+	policy.Namespace = desired.Namespace
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, policy, func() error {
+		policy.Labels = desired.Labels
+		policy.Spec = desired.Spec
+		return controllerutil.SetControllerReference(gw, policy, r.Scheme)
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile metrics network policy: %w", err)
 	}
 	return nil
 }
@@ -452,6 +489,7 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&v1alpha1.MailoutGateway{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&corev1.Secret{}).
 		Watches(&v1alpha1.MailoutAccount{},
 			handler.EnqueueRequestsFromMapFunc(r.gatewayForAccount)).

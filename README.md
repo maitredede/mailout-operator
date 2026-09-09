@@ -64,9 +64,13 @@ The decisions worth knowing about:
 - **AUTH is only offered over TLS.** No credential crosses the wire in clear.
 - **SNI works on both ports**, 587 and 465, so one gateway can answer on several
   names with several certificates.
-- **Filters can only be switched off by an account, never added.** An
-  application must not be able to route its mail through a filter of its own
-  choosing.
+- **Filters belong to the gateway, and an account cannot touch them.** Neither
+  add — an application must not route its mail through a filter of its own
+  choosing — nor skip. There used to be a per-account opt-out, and a virus
+  scanner is exactly what it got used to skip: the account relayed unscanned
+  attachments through the relay's IP and reputation while the admin who set
+  `failOpen: false` believed the scan mandatory. An account that needs different
+  filters belongs on a different gateway, the same answer as for quotas.
 - **A filter that is down stops the mail** (`451`, retry later) unless you set
   `failOpen`. A virus scanner that is unreachable must not turn the relay into a
   conduit for malware.
@@ -279,6 +283,30 @@ prometheus-operator's CRD is served by the cluster.
 | `mailout_upstream_delivery_seconds` | What the submitting application waits on, delivery being synchronous |
 | `mailout_config_reloads_total{result}` | A failed reload keeps the previous configuration; this is the only sign the relay is running on something stale |
 | `mailout_accounts`, `mailout_accounts_rejected` | Accounts served, and accounts dropped because their own settings are unusable |
+
+Anyone who can reach a gateway pod can read that endpoint. It carries no
+credential and no message content, but it does list the accounts served, the
+domains signed and the volume each account sends — enough to map the tenants of
+a shared gateway. To close it, name your scrapers and the operator renders a
+NetworkPolicy:
+
+```yaml
+spec:
+  metrics:
+    allowedScrapers:
+      - namespaceSelector:
+          matchLabels: { kubernetes.io/metadata.name: monitoring }
+        podSelector:
+          matchLabels: { app.kubernetes.io/name: prometheus }
+```
+
+The rendered policy always leaves 587 and 465 open from anywhere, and that is
+the point rather than a courtesy: attaching any NetworkPolicy to a pod switches
+it to deny-by-default for ingress, so a policy naming only the metrics port
+would stop all mail — with nothing in the gateway's logs to say why, because the
+connections never arrive. Declare nothing and no policy is rendered. And note
+that a NetworkPolicy on a cluster whose CNI does not enforce them is a silent
+no-op, which is worse than nothing because it looks like protection.
 
 The three worth alerting on: `result="deferred"` rising (the upstream is in
 trouble), `decision="error"` on the rate limiter (the quota store is, and it is

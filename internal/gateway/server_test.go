@@ -427,24 +427,28 @@ func TestFilteredMessageKeepsFilterHeader(t *testing.T) {
 	}
 }
 
-// An account may opt out of one of the gateway's filters; the others still run.
-func TestAccountCanDisableAFilter(t *testing.T) {
+// A gateway's filters apply to every account, with no way for an account to
+// skip one. There used to be a per-account opt-out, and a virus scanner is
+// exactly what it was used to skip: the account relayed unscanned attachments
+// through the relay's own IP and reputation, while the admin who set failOpen
+// false believed the scan mandatory.
+func TestAnAccountCannotSkipAFilter(t *testing.T) {
 	rejecting := startTestMilter(t, &testMilterBackend{rejectOn: "hello"})
 	gw := newTestGateway(t, func(cfg *Config) {
 		cfg.Milters = []Milter{{Name: "picky", Address: rejecting}}
-		cfg.Accounts[0].DisableMilters = []string{"picky"}
 	})
 
 	c := gw.dialSubmission(t)
 	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
 		t.Fatalf("AUTH: %v", err)
 	}
-	if err := c.SendMail("app@example.test", []string{"dest@example.test"},
-		strings.NewReader("Subject: fine\r\n\r\nhello\r\n")); err != nil {
-		t.Fatalf("the disabled filter still rejected the message: %v", err)
+	err := c.SendMail("app@example.test", []string{"dest@example.test"},
+		strings.NewReader("Subject: fine\r\n\r\nhello\r\n"))
+	if err == nil {
+		t.Fatal("the filter did not run for this account")
 	}
-	if len(gw.upstream.received()) != 1 {
-		t.Fatal("message not relayed")
+	if len(gw.upstream.received()) != 0 {
+		t.Error("the message reached the upstream despite the filter refusing it")
 	}
 }
 

@@ -5,6 +5,26 @@
 Found by an adversarial review of the previous release. Two of these will refuse
 things your cluster accepted yesterday, so read the first two.
 
+**`spec.milters.disable` is gone.** A tenant used it to skip the gateway's
+filters, and a virus scanner is what it got used to skip: the account relayed
+unscanned attachments through the relay's IP and reputation while the admin who
+set `failOpen: false` believed the scan mandatory. The field is pruned by the
+API server, so an existing account keeps applying, minus the opt-out — every
+filter now runs for every account. If one genuinely needs different filters,
+give it its own gateway. To find the accounts that relied on it, before
+upgrading:
+
+```bash
+kubectl get mailoutaccounts -A -o json | jq -r '
+  .items[] | select(.spec.milters.disable != null)
+  | "\(.metadata.namespace)/\(.metadata.name): \(.spec.milters.disable | join(","))"'
+```
+
+**A username conflict no longer says who holds the name.** The message a tenant
+gets is `already taken on this gateway`; the pair is in the operator's log. It
+used to name the namespace and object holding it, which let a tenant map the
+other tenants of a shared gateway by guessing names.
+
 **`spec.username` is now validated, and an account that fails is dropped.** The
 name reaches the `Received` header of every message the account sends, so a name
 containing a CR or LF let the account write headers — and a body — of its own

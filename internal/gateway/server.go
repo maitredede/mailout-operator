@@ -121,9 +121,6 @@ func newSnapshot(cfg *Config, log *slog.Logger, metrics *Metrics, prev *snapshot
 			senders:             newSenderPolicy(acct.AllowedSenders),
 			skipHeaderFromCheck: acct.SkipHeaderFromCheck,
 		}
-		if len(acct.DisableMilters) > 0 {
-			policy.milters = milters.without(acct.DisableMilters)
-		}
 		snap.policies[acct.Username] = policy
 	}
 	return snap, nil

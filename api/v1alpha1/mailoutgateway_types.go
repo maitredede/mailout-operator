@@ -43,6 +43,10 @@ type MailoutGatewaySpec struct {
 
 	// +optional
 	Deployment DeploymentSpec `json:"deployment,omitempty"`
+
+	// Metrics restricts who may read the dataplane's Prometheus endpoint.
+	// +optional
+	Metrics MetricsSpec `json:"metrics,omitempty"`
 }
 
 // RateLimitSpec caps what each account may send, per minute, counted in a
@@ -359,4 +363,41 @@ type MailoutGatewayList struct {
 
 func init() {
 	SchemeBuilder.Register(&MailoutGateway{}, &MailoutGatewayList{})
+}
+
+// MetricsSpec restricts access to the metrics endpoint.
+type MetricsSpec struct {
+	// AllowedScrapers, when set, makes the operator render a NetworkPolicy for
+	// the gateway's pods: the metrics port is reachable only from these peers,
+	// and the SMTP ports stay reachable from anywhere.
+	//
+	// That second half is not a courtesy, it is the point. Attaching any
+	// NetworkPolicy to a pod switches it to deny-by-default for ingress, so a
+	// policy that named only the metrics port would silently stop all mail.
+	// The rendered policy always opens the listeners.
+	//
+	// Left empty, no NetworkPolicy is rendered and the endpoint stays reachable
+	// from anywhere in the cluster. It carries no credential and no message
+	// content, but it does list the accounts served, the domains signed and the
+	// volume each account sends — enough to map the tenants of a shared
+	// gateway.
+	//
+	// A NetworkPolicy on a cluster whose CNI does not enforce them is a silent
+	// no-op, which is worse than nothing because it looks like protection.
+	// +optional
+	AllowedScrapers []NetworkPeer `json:"allowedScrapers,omitempty"`
+}
+
+// NetworkPeer selects where traffic may come from. At least one of the two
+// selectors must be set; an empty selector matches everything in its
+// dimension, which is how Kubernetes NetworkPolicy peers already work.
+type NetworkPeer struct {
+	// NamespaceSelector matches the namespaces the scraper may run in. Empty
+	// with a podSelector set means the gateway's own namespace.
+	// +optional
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+	// PodSelector matches the scraper's pods. Empty means every pod in the
+	// selected namespaces.
+	// +optional
+	PodSelector *metav1.LabelSelector `json:"podSelector,omitempty"`
 }

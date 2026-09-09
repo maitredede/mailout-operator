@@ -116,24 +116,6 @@ spec:
                 required:
                 - name
                 type: object
-              milters:
-                description: |-
-                  AccountMiltersSpec adjusts the gateway's filter chain for this account.
-                  Filters can only be switched off, never added: an account must not be able to
-                  route its mail through a filter of its choosing.
-                properties:
-                  disable:
-                    description: |-
-                      Disable names gateway filters to skip for this account, by their
-                      spec.milters[].name. A filter name is a DNS label, and there cannot be
-                      more of them than the gateway declares — the bounds are there so this
-                      field cannot be used to inflate the shared configuration Secret.
-                    items:
-                      maxLength: 63
-                      type: string
-                    maxItems: 32
-                    type: array
-                type: object
               rotation:
                 description: |-
                   Rotation is an opaque value: changing it regenerates the password. Any

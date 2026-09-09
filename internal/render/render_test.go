@@ -12,6 +12,7 @@ import (
 	"github.com/maitredede/mailout-operator/api/v1alpha1"
 	"github.com/maitredede/mailout-operator/internal/gateway"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/utils/ptr"
@@ -802,5 +803,81 @@ func TestGatewayPodMountsNoServiceAccountToken(t *testing.T) {
 	if spec.ServiceAccountName != "" {
 		t.Errorf("the gateway pod names a ServiceAccount (%q); it needs none",
 			spec.ServiceAccountName)
+	}
+}
+
+// Attaching any NetworkPolicy to a pod switches it to deny-by-default for
+// ingress. A policy naming only the metrics port would therefore deny 587 and
+// 465 too, and mail would stop for every tenant — with nothing in the gateway's
+// logs to say why, because the connections never arrive. This is the assertion
+// that keeps the hardening from being an outage.
+func TestMetricsNetworkPolicyLeavesSMTPOpen(t *testing.T) {
+	gw := testGateway()
+	gw.Spec.Metrics.AllowedScrapers = []v1alpha1.NetworkPeer{{
+		NamespaceSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{"kubernetes.io/metadata.name": "monitoring"},
+		},
+		PodSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{"app.kubernetes.io/name": "prometheus"},
+		},
+	}}
+	cfg, err := GatewayConfig(Input{Gateway: gw})
+	if err != nil {
+		t.Fatalf("GatewayConfig: %v", err)
+	}
+
+	policy := MetricsNetworkPolicy(gw, cfg)
+	if policy == nil {
+		t.Fatal("no policy rendered although a scraper is declared")
+	}
+
+	byPort := map[int32]networkingv1.NetworkPolicyIngressRule{}
+	for _, rule := range policy.Spec.Ingress {
+		for _, port := range rule.Ports {
+			byPort[int32(port.Port.IntValue())] = rule
+		}
+	}
+
+	// Every listener the gateway serves must be reachable from anywhere: an
+	// empty From means all sources.
+	for _, l := range cfg.Listeners {
+		port := listenerPortOf(l)
+		rule, found := byPort[port]
+		if !found {
+			t.Errorf("listener %s (port %d) is not in the policy, so mail would stop", l.Name, port)
+			continue
+		}
+		if len(rule.From) != 0 {
+			t.Errorf("listener %s is restricted to %d peers; submission comes from applications "+
+				"anywhere in the cluster", l.Name, len(rule.From))
+		}
+	}
+
+	// And the metrics port is not.
+	rule, found := byPort[MetricsPort]
+	if !found {
+		t.Fatalf("the metrics port %d is not in the policy", MetricsPort)
+	}
+	if len(rule.From) != 1 {
+		t.Fatalf("metrics rule has %d peers, want the declared one", len(rule.From))
+	}
+	if rule.From[0].PodSelector == nil || rule.From[0].NamespaceSelector == nil {
+		t.Error("the declared selectors did not reach the policy")
+	}
+	if policy.Spec.PodSelector.MatchLabels == nil {
+		t.Error("the policy selects no pod, so it applies to everything in the namespace")
+	}
+}
+
+// No scraper declared, no policy: rendering one would switch the pods to
+// deny-by-default for an installation that never asked for it.
+func TestNoMetricsNetworkPolicyWithoutScrapers(t *testing.T) {
+	gw := testGateway()
+	cfg, err := GatewayConfig(Input{Gateway: gw})
+	if err != nil {
+		t.Fatalf("GatewayConfig: %v", err)
+	}
+	if policy := MetricsNetworkPolicy(gw, cfg); policy != nil {
+		t.Error("a NetworkPolicy was rendered with no scraper declared")
 	}
 }
