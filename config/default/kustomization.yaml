@@ -7,11 +7,29 @@ kind: Kustomization
 #
 #   kubectl apply -k config/default
 resources:
-  - ../crd
-  - ../rbac
-  - ../manager
-  - ../webhook
+- ../crd
+- ../rbac
+- ../manager
+- ../webhook
+
+# The dataplane runs the same binary as the operator, so it must run the same
+# image — and `kustomize edit set image` only rewrites the container's image
+# field. Without this replacement, `make deploy IMG=...` produced an operator
+# that told every gateway pod to pull the default ghcr.io tag, which on any
+# cluster that cannot reach it is an ImagePullBackOff for the whole dataplane.
+replacements:
+- source:
+    kind: Deployment
+    name: mailout-operator
+    fieldPath: spec.template.spec.containers.[name=operator].image
+  targets:
+  - select:
+      kind: Deployment
+      name: mailout-operator
+    fieldPaths:
+    - spec.template.spec.containers.[name=operator].env.[name=MAILOUT_GATEWAY_IMAGE].value
 
 images:
-  - name: ghcr.io/maitredede/mailout-operator
-    newTag: dev
+- name: ghcr.io/maitredede/mailout-operator
+  newName: dkr.daly.nc/mailout/operator
+  newTag: 0.1.0-40a97cf

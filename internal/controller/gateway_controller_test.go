@@ -5,6 +5,7 @@
 package controller
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -496,4 +497,75 @@ func TestUnrelatedSecretMapsToNoGateway(t *testing.T) {
 	if requests := r.gatewayForAccountSecret(t.Context(), secret); len(requests) != 0 {
 		t.Fatalf("an unrelated Secret enqueued %+v", requests)
 	}
+}
+
+// strippedCacheClient mimics what the operator's Secret cache does in a
+// cluster: it keeps only the two keys read from an account's Secret and drops
+// everything else, so a cached read of the gateway's own configuration Secret
+// comes back without its metricsToken.
+//
+// Reproduced here because envtest gives the reconciler the same object for
+// Client and APIReader, so nothing strips anything and the regression below
+// would pass on its own.
+type strippedCacheClient struct {
+	client.Client
+}
+
+func (c strippedCacheClient) Get(ctx context.Context, key client.ObjectKey,
+	obj client.Object, opts ...client.GetOption) error {
+	if err := c.Client.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if secret, ok := obj.(*corev1.Secret); ok {
+		kept := map[string][]byte{}
+		for _, k := range []string{corev1.BasicAuthPasswordKey, render.PasswordHashKey} {
+			if v, found := secret.Data[k]; found {
+				kept[k] = v
+			}
+		}
+		secret.Data = kept
+	}
+	return nil
+}
+
+// The metrics token must survive a reconcile, or Prometheus authenticates with
+// a value the gateway no longer expects.
+//
+// It regressed on the first real deployment: read through the cache, the token
+// came back absent and was regenerated on every pass — and the pod, whose
+// mounted Secret lags a kubelet sync behind, answered 401 to every scrape.
+func TestMetricsTokenIsStableAcrossReconciles(t *testing.T) {
+	c := newTestClient(t)
+	ensureOperatorNamespace(t, c)
+	gw := newGateway(t, c, "tokenstable")
+
+	// Client goes through the stripping cache, APIReader does not — the shape
+	// the operator actually runs with.
+	r := newGatewayReconciler(strippedCacheClient{c})
+	r.APIReader = c
+
+	reconcileGateway(t, r, gw)
+	first := configSecretToken(t, c, gw.Name)
+	if first == "" {
+		t.Fatal("no metrics token was generated")
+	}
+
+	for pass := range 3 {
+		reconcileGateway(t, r, gw)
+		if got := configSecretToken(t, c, gw.Name); got != first {
+			t.Fatalf("the token changed on pass %d: %q became %q", pass+2, first, got)
+		}
+	}
+
+	// And the configuration the pod reads carries the same value, or the two
+	// halves of the credential disagree.
+	if cfg := renderedConfig(t, c, gw.Name); cfg.Metrics.Token != first {
+		t.Errorf("the configuration carries %q while the secret key holds %q",
+			cfg.Metrics.Token, first)
+	}
+}
+
+func configSecretToken(t *testing.T, c client.Client, gatewayName string) string {
+	t.Helper()
+	return string(getSecret(t, c, operatorNamespace, render.ConfigSecretName(gatewayName)).Data[render.MetricsTokenKey])
 }

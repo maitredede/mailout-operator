@@ -339,7 +339,13 @@ func (r *GatewayReconciler) reconcileCertificate(ctx context.Context, gw *v1alph
 func (r *GatewayReconciler) metricsToken(ctx context.Context, gw *v1alpha1.MailoutGateway) (string, error) {
 	var secret corev1.Secret
 	key := client.ObjectKey{Namespace: gw.Namespace, Name: render.ConfigSecretName(gw.Name)}
-	switch err := r.Get(ctx, key, &secret); {
+	// Read past the cache. The cache keeps only the two keys the operator reads
+	// from an account's Secret, so a cached read of this one comes back without
+	// its metricsToken — and a token read as absent is a token regenerated on
+	// every reconcile. The pod, whose mounted Secret lags by a kubelet sync,
+	// then authenticates with a value the Secret no longer holds and every
+	// scrape returns 401. Found by deploying it.
+	switch err := r.APIReader.Get(ctx, key, &secret); {
 	case err == nil:
 		if token := string(secret.Data[render.MetricsTokenKey]); token != "" {
 			return token, nil
