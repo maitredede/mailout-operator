@@ -117,8 +117,15 @@ func kustomizeBuild(t *testing.T, dir string) []byte {
 		t.Fatalf("kustomize build %s: %v\n%s", dir, err, stderr.String())
 	}
 	// config/default pins the released image; the test runs the local build.
-	return bytes.ReplaceAll(out,
+	out = bytes.ReplaceAll(out,
 		[]byte("ghcr.io/maitredede/mailout-operator:dev"), []byte(testImage()))
+	// And it asks for Always, which is right for a cluster pulling :dev from a
+	// registry and wrong here: the image is side-loaded into k3s and does not
+	// exist remotely, so the kubelet would fail the pull and the Deployment
+	// would never become available. This is the substitution the manifest's own
+	// comment tells a real deployment to make once its tag is immutable.
+	return bytes.ReplaceAll(out,
+		[]byte("imagePullPolicy: Always"), []byte("imagePullPolicy: IfNotPresent"))
 }
 
 // waitForCondition polls an unstructured object until one of its status

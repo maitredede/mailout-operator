@@ -112,6 +112,21 @@ func (s *spool) Reader() (io.Reader, error) {
 	return s.file, nil
 }
 
+// ReaderAt reads from an offset, which is how the body is streamed past a
+// header block that has already been parsed.
+func (s *spool) ReaderAt(offset int64) (io.Reader, error) {
+	if offset > s.n {
+		offset = s.n
+	}
+	if s.file == nil {
+		return bytes.NewReader(s.buf.Bytes()[offset:]), nil
+	}
+	if _, err := s.file.Seek(offset, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek spool: %w", err)
+	}
+	return s.file, nil
+}
+
 // Bytes materializes the whole body on the heap.
 //
 // Every caller of this is a caller that has not been taught to stream, and on a

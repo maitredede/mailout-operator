@@ -62,7 +62,12 @@ func (m *testMilter) MailFrom(from, _ string, mod milter.Modifier) (*milter.Resp
 }
 
 func (m *testMilter) BodyChunk(chunk []byte, _ milter.Modifier) (*milter.Response, error) {
-	m.body.Write(chunk)
+	// Only kept when a test needs to look at it. This filter runs in the same
+	// process as the gateway under test, so accumulating a 20 MiB body here
+	// would be counted by any measurement of the gateway's own memory.
+	if m.backend.rejectOn != "" {
+		m.body.Write(chunk)
+	}
 	return milter.RespContinue, nil
 }
 

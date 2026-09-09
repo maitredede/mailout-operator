@@ -3,10 +3,10 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"strings"
@@ -202,31 +202,43 @@ func (c *milterChain) runOne(ctx context.Context, f milterFilter, msg *Message, 
 		return err
 	}
 
-	// The only stage that still materializes the whole body: the milter
-	// protocol hands headers and body to the filter and takes modifications
-	// back, and this chain applies them through parsedMessage. On a spooled
-	// message that undoes what the spool is for, which is why it is the next
-	// thing to stream.
-	data, err := msg.Body.Bytes()
+	// Only the header block is parsed, and it is bounded: the body goes to the
+	// filter straight from the spool. A milter hands headers and body over
+	// separately, and BodyReadFrom takes a reader, so nothing here needs the
+	// message in memory — which is what keeps a 25 MiB submission from costing
+	// 25 MiB of heap per filter in the chain.
+	header, terminated, err := msg.Body.headerBlock()
 	if err != nil {
 		return err
 	}
-	parsed, err := parseMessage(data)
-	if err != nil {
-		return fmt.Errorf("parse message: %w", err)
-	}
-	for _, h := range parsed.Headers {
-		if err := check(session.HeaderField(h.Name, h.Value, nil)); err != nil {
-			return err
+	var parsed *parsedMessage
+	if terminated {
+		if parsed, err = parseMessage(header); err != nil {
+			return fmt.Errorf("parse message: %w", err)
 		}
+		for _, h := range parsed.Headers {
+			if err := check(session.HeaderField(h.Name, h.Value, nil)); err != nil {
+				return err
+			}
+		}
+	} else {
+		// No end of header block within the bound. parseMessage would call the
+		// whole thing a body, and so does this: the filter sees no headers and
+		// the entire message as content.
+		parsed = &parsedMessage{}
+		header = nil
 	}
 	if err := check(session.HeaderEnd()); err != nil {
 		return err
 	}
 
+	body, err := msg.Body.ReaderAt(int64(len(header)))
+	if err != nil {
+		return err
+	}
 	// BodyReadFrom sends the body and calls End itself, so the modifications it
 	// returns are the filter's final verdict.
-	acts, act, err := session.BodyReadFrom(bytes.NewReader(parsed.Body))
+	acts, act, err := session.BodyReadFrom(body)
 	if err != nil {
 		return fmt.Errorf("send body: %w", err)
 	}
@@ -234,25 +246,40 @@ func (c *milterChain) runOne(ctx context.Context, f milterFilter, msg *Message, 
 		return err
 	}
 
-	return c.applyModifications(f, msg, parsed, acts)
+	return c.applyModifications(f, msg, parsed, int64(len(header)), acts)
 }
 
 // applyModifications folds a filter's requested changes into the message.
-func (c *milterChain) applyModifications(f milterFilter, msg *Message, parsed *parsedMessage, acts []milter.ModifyAction) error {
-	var replacement []byte
-	replaced := false
+func (c *milterChain) applyModifications(f milterFilter, msg *Message, parsed *parsedMessage,
+	headerLen int64, acts []milter.ModifyAction) error {
+	// A replaced body is the filter's own output and can be any size, so it
+	// goes to a spool of its own rather than growing on the heap.
+	var replacement *spool
+	defer func() {
+		if replacement != nil {
+			_ = replacement.Close()
+		}
+	}()
+	headersChanged := false
 	for _, act := range acts {
 		switch act.Type {
 		case milter.ActionAddHeader:
 			parsed.addHeader(act.HeaderName, act.HeaderValue)
+			headersChanged = true
 		case milter.ActionInsertHeader:
 			parsed.insertHeader(int(act.HeaderIndex), act.HeaderName, act.HeaderValue)
+			headersChanged = true
 		case milter.ActionChangeHeader:
 			parsed.changeHeader(int(act.HeaderIndex), act.HeaderName, act.HeaderValue)
+			headersChanged = true
 		case milter.ActionReplaceBody:
 			// Replacement arrives as a sequence of chunks.
-			replacement = append(replacement, act.Body...)
-			replaced = true
+			if replacement == nil {
+				replacement = msg.Body.sibling()
+			}
+			if _, err := replacement.Write(act.Body); err != nil {
+				return err
+			}
 		case milter.ActionChangeFrom:
 			msg.From = unbracket(act.From)
 		case milter.ActionAddRcpt:
@@ -274,12 +301,13 @@ func (c *milterChain) applyModifications(f milterFilter, msg *Message, parsed *p
 				"milter", f.cfg.Name, "type", act.Type)
 		}
 	}
-	if replaced {
-		parsed.Body = replacement
+	if headersChanged || replacement != nil {
+		if err := rewriteBody(msg, parsed, headerLen, replacement); err != nil {
+			return err
+		}
 	}
-	if err := msg.Body.Reset(parsed.Bytes()); err != nil {
-		return err
-	}
+	// Otherwise the message is untouched and stays exactly where it is: a
+	// filter that only accepts — the common case — costs no copy at all.
 	if len(msg.To) == 0 {
 		return &smtp.SMTPError{
 			Code:         554,
@@ -348,4 +376,38 @@ func removeRecipient(list []string, addr string) []string {
 		}
 	}
 	return out
+}
+
+// rewriteBody rebuilds the message from the modified headers and either the
+// filter's replacement body or the original one, streaming both.
+//
+// The result goes to a new spool rather than over the existing one: the source
+// is still being read from while the destination is written, and truncating in
+// place would pull the ground out from under it.
+func rewriteBody(msg *Message, parsed *parsedMessage, headerLen int64, replacement *spool) error {
+	out := msg.Body.sibling()
+	if err := parsed.WriteHeaders(out); err != nil {
+		_ = out.Close()
+		return err
+	}
+
+	var source io.Reader
+	var err error
+	if replacement != nil {
+		source, err = replacement.Reader()
+	} else {
+		source, err = msg.Body.ReaderAt(headerLen)
+	}
+	if err != nil {
+		_ = out.Close()
+		return err
+	}
+	if _, err := io.Copy(out, source); err != nil {
+		_ = out.Close()
+		return err
+	}
+
+	_ = msg.Body.Close()
+	msg.Body = out
+	return nil
 }

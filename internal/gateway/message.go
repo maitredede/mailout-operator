@@ -71,6 +71,18 @@ func parseMessage(data []byte) (*parsedMessage, error) {
 	return msg, nil
 }
 
+// WriteHeaders writes the header block and the blank line that ends it, so a
+// caller can stream a body after it instead of holding one in memory.
+func (m *parsedMessage) WriteHeaders(w io.Writer) error {
+	for _, f := range m.Headers {
+		if _, err := fmt.Fprintf(w, "%s: %s\r\n", f.Name, f.Value); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(w, "\r\n")
+	return err
+}
+
 // Bytes serializes the message back to wire format.
 func (m *parsedMessage) Bytes() []byte {
 	var buf bytes.Buffer

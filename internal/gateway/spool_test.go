@@ -283,3 +283,100 @@ func TestLongBodyLineIsRelayed(t *testing.T) {
 		t.Fatalf("upstream received %d messages, want 1", len(received))
 	}
 }
+
+// The milter stage was the last one holding a whole message in memory: it read
+// the body back to split headers from body, so a spooled 20 MiB submission
+// landed on the heap anyway for every filter in the chain. Only the header
+// block is parsed now, and the body goes to the filter straight from the spool.
+func TestLargeMessageThroughAMilterDoesNotSizeTheHeap(t *testing.T) {
+	const bodySize = 20 << 20
+
+	for name, backend := range map[string]*testMilterBackend{
+		// A filter that only accepts must cost no copy at all.
+		"accepting":       {},
+		"adding a header": {addHeader: "X-Scanned"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			address := startTestMilter(t, backend)
+			gw := newTestGateway(t, func(cfg *Config) {
+				cfg.Limits.SpoolDir = t.TempDir()
+				cfg.Limits.SpoolThreshold = 1 << 20
+				cfg.Milters = []Milter{{Name: "scanner", Address: address}}
+			})
+			gw.upstream.mu.Lock()
+			gw.upstream.discardBody = true
+			gw.upstream.mu.Unlock()
+
+			c := gw.dialSubmission(t)
+			if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
+				t.Fatalf("AUTH: %v", err)
+			}
+
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+
+			source := io.MultiReader(
+				strings.NewReader("Subject: big\r\n\r\n"),
+				io.LimitReader(&lineReader{}, bodySize),
+			)
+			if err := c.SendMail("app@example.test", []string{"dest@example.test"}, source); err != nil {
+				t.Fatalf("SendMail: %v", err)
+			}
+
+			runtime.ReadMemStats(&after)
+			if grew := int64(after.HeapAlloc) - int64(before.HeapAlloc); grew > bodySize/2 {
+				t.Errorf("the heap grew by %d bytes for a %d byte message: the milter stage "+
+					"is still buffering it", grew, bodySize)
+			}
+
+			gw.upstream.mu.Lock()
+			seen := gw.upstream.bytesSeen
+			gw.upstream.mu.Unlock()
+			if seen < bodySize {
+				t.Errorf("upstream saw %d bytes, want at least %d: the streaming path truncated it",
+					seen, bodySize)
+			}
+		})
+	}
+}
+
+// A filter that replaces the body of a large message must not put the
+// replacement on the heap either.
+func TestReplacedBodyIsSpooled(t *testing.T) {
+	address := startTestMilter(t, &testMilterBackend{replaceBody: "replaced by the filter\r\n"})
+	gw := newTestGateway(t, func(cfg *Config) {
+		cfg.Limits.SpoolDir = t.TempDir()
+		cfg.Limits.SpoolThreshold = 1 << 10
+		cfg.Milters = []Milter{{Name: "rewriter", Address: address}}
+	})
+
+	c := gw.dialSubmission(t)
+	if err := c.Auth(sasl.NewPlainClient("", testAccount, testPassword)); err != nil {
+		t.Fatalf("AUTH: %v", err)
+	}
+	// Wrapped: a single 11 KB line would exceed the gateway's own line limit.
+	body := "Subject: original\r\n\r\n" + strings.Repeat("x0123456789\r\n", 1000)
+	if err := c.SendMail("app@example.test", []string{"dest@example.test"}, strings.NewReader(body)); err != nil {
+		t.Fatalf("SendMail: %v", err)
+	}
+
+	received := gw.upstream.received()
+	if len(received) != 1 {
+		t.Fatalf("upstream received %d messages, want 1", len(received))
+	}
+	relayed := string(received[0].Data)
+	if !strings.Contains(relayed, "replaced by the filter") {
+		t.Errorf("the replacement body did not reach the upstream:\n%.300s", relayed)
+	}
+	if strings.Contains(relayed, "x0123456789x0123456789") {
+		t.Error("the original body survived alongside the replacement")
+	}
+	// The headers the gateway wrote must still be there, and exactly once.
+	if n := strings.Count(relayed, "Subject: original"); n != 1 {
+		t.Errorf("Subject appears %d times, want 1", n)
+	}
+	if !strings.Contains(relayed, "Received: from") {
+		t.Error("the Received header was lost in the rewrite")
+	}
+}
