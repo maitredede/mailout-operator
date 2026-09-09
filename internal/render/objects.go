@@ -368,8 +368,9 @@ func Deployment(gw *v1alpha1.MailoutGateway, cfg *gateway.Config, accounts []Acc
 					// later would silently become the relay's.
 					AutomountServiceAccountToken: ptr.To(false),
 					Containers: []corev1.Container{{
-						Name:  "gateway",
-						Image: image,
+						Name:            "gateway",
+						Image:           image,
+						ImagePullPolicy: PullPolicyFor(image),
 						Args: []string{
 							"gateway",
 							"--config=" + ConfigFilePath(),
@@ -562,4 +563,26 @@ func listenerPortOf(l gateway.Listener) int32 {
 		return 0
 	}
 	return int32(n) //nolint:gosec // a port fits in int32 by construction
+}
+
+// PullPolicyFor decides whether a node may serve this image from its cache.
+//
+// A moving tag served from cache is how two replicas end up running different
+// code with nothing saying so, and how a rebuilt :dev never reaches the
+// cluster. A digest or a version tag, on the other hand, means what it says, so
+// pulling again on every start is a needless round trip to the registry.
+func PullPolicyFor(image string) corev1.PullPolicy {
+	if strings.Contains(image, "@sha256:") {
+		return corev1.PullIfNotPresent
+	}
+	tag := ""
+	if i := strings.LastIndex(image, ":"); i > strings.LastIndex(image, "/") {
+		tag = image[i+1:]
+	}
+	switch tag {
+	case "", "dev", "latest", "main", "edge", "nightly":
+		return corev1.PullAlways
+	default:
+		return corev1.PullIfNotPresent
+	}
 }

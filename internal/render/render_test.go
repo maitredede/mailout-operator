@@ -881,3 +881,24 @@ func TestNoMetricsNetworkPolicyWithoutScrapers(t *testing.T) {
 		t.Error("a NetworkPolicy was rendered with no scraper declared")
 	}
 }
+
+// A moving tag served from a node's cache is how two replicas end up running
+// different code with nothing saying so, and how a rebuilt :dev never reaches
+// the cluster at all.
+func TestPullPolicyFor(t *testing.T) {
+	for image, want := range map[string]corev1.PullPolicy{
+		"ghcr.io/maitredede/mailout-operator:dev":    corev1.PullAlways,
+		"ghcr.io/maitredede/mailout-operator:latest": corev1.PullAlways,
+		"ghcr.io/maitredede/mailout-operator":        corev1.PullAlways,
+		"ghcr.io/maitredede/mailout-operator:v0.1.0": corev1.PullIfNotPresent,
+		// A registry with a port must not be read as a tag.
+		"registry.local:5000/mailout":        corev1.PullAlways,
+		"registry.local:5000/mailout:v1.2.3": corev1.PullIfNotPresent,
+		// A digest means what it says whatever the tag next to it.
+		"ghcr.io/maitredede/mailout-operator:dev@sha256:" + strings.Repeat("a", 64): corev1.PullIfNotPresent,
+	} {
+		if got := PullPolicyFor(image); got != want {
+			t.Errorf("PullPolicyFor(%q) = %q, want %q", image, got, want)
+		}
+	}
+}

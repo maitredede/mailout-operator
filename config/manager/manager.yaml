@@ -53,6 +53,11 @@ spec:
       containers:
         - name: operator
           image: ghcr.io/maitredede/mailout-operator:dev
+          # :dev is a moving tag, so a node that already cached one build would
+          # keep running it — and two replicas could run different code without
+          # anything saying so. Set this to IfNotPresent once you deploy an
+          # immutable tag or a digest.
+          imagePullPolicy: Always
           args:
             - operator
             - --leader-elect
