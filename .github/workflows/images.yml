@@ -31,6 +31,31 @@
 # constructions, amd64 comme arm64, ont lieu sur des daemons DANS le cluster. Une
 # panne du cluster casse ce workflow où que vive le runner — l'avoir déplacé sur
 # dede n'y change rien. Ça vient de nous coûter une soirée de fausses pistes.
+#
+# ---------------------------------------------------------------------------
+# Ce qui a été MESURÉ sur le runner, le 2026-09-17
+# ---------------------------------------------------------------------------
+# Dans le conteneur `gh-runner-mailout-operator`, uid 1001. Ça vaut pour l'image
+# de runner d'aujourd'hui, pas pour l'éternité : une mise à jour d'image peut
+# invalider n'importe laquelle de ces lignes.
+#
+#   docker ................................. PRÉSENT (/usr/bin/docker)
+#   envsubst ............................... ABSENT   -> shim obligatoire, cf. plus bas
+#   jq, curl, python3, git ................. présents
+#   base64 -w0 ............................. fonctionne
+#   /certs/buildkit/{ca,tls}.crt, tls.key .. lisibles par l'uid 1001
+#   buildkitd-amd64.buildkit.svc:1234 ...... joignable
+#   buildkitd-arm64.buildkit.svc:1234 ...... joignable
+#   https://fulcio.sigstore.dev ............ 200 -> cosign keyless a sa sortie Internet
+#
+# Et ce qui reste NON vérifié, à ne pas transformer en affirmation :
+#
+#  - le `servername` mTLS face aux SAN des certificats des daemons : un nom qui ne
+#    colle pas n'échoue qu'au `buildx inspect --bootstrap`, pas avant ;
+#  - la forme réelle de `metadata.json` avec un builder à deux nœuds, donc
+#    laquelle des deux branches de « Collect pushed reference » répond ;
+#  - l'existence des secrets REGISTRY_USER / REGISTRY_PASSWORD au niveau du dépôt
+#    (ils étaient passés au workflow appelé, ils sont maintenant lus ici).
 name: Images
 
 on:
@@ -154,9 +179,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # buildx en binaire autonome : le runner n'a pas de daemon Docker, donc
-      # `docker/setup-buildx-action` et `docker/build-push-action` ne peuvent pas
-      # fonctionner. On appelle `buildx` directement (bake, imagetools).
+      # buildx en binaire autonome, et épinglé. `docker/setup-buildx-action` et
+      # `docker/build-push-action` construiraient sur un daemon LOCAL, alors que
+      # tout doit se passer sur les deux daemons distants — seule façon d'obtenir
+      # de l'amd64 ET de l'arm64 natifs. On appelle donc `buildx` directement
+      # (bake, imagetools) contre le builder `remote` créé à l'étape suivante.
       - name: Install buildx (standalone)
         run: |
           set -euo pipefail
@@ -212,11 +239,13 @@ jobs:
           buildx use remote
           buildx inspect --bootstrap remote
 
-      # Pas de `docker/login-action` : il fait un `docker login`, donc il exige la
-      # CLI Docker, que l'image du runner n'a pas (et il n'y a pas de daemon non
-      # plus — la construction est sur les daemons distants). On écrit directement
-      # le fichier d'identifiants que buildx, cosign, trivy et syft lisent tous.
-      # Remplacer ceci par login-action casse en silence.
+      # Pas de `docker/login-action`, et ce n'est PAS parce que la CLI Docker
+      # manquerait : elle est présente sur ce runner (/usr/bin/docker, mesuré le
+      # 2026-09-17). La raison est qu'il n'y a rien à gagner à faire dépendre deux
+      # champs JSON d'un binaire tiers et d'une action de plus, quand les quatre
+      # outils qui s'authentifient ici — buildx, cosign, trivy, syft — lisent tous
+      # directement ce fichier. L'ancienne justification héritée du runner ARC
+      # (« pas de CLI Docker ») est fausse ici : ne pas la réintroduire.
       - name: Registry login (config.json)
         env:
           REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
@@ -257,8 +286,10 @@ jobs:
           set -euo pipefail
           image="${REGISTRY}/operator"
           digest=""
-          # jq n'est pas garanti sur cet hôte de runner : son absence n'est pas une
-          # erreur, elle renvoie simplement au repli `imagetools inspect`.
+          # jq est présent sur ce runner (mesuré le 2026-09-17) ; le `command -v`
+          # ne fait que refuser de mourir sur une image future qui l'aurait perdu.
+          # Le repli `imagetools inspect` ci-dessous couvre un tout autre cas, qui
+          # lui est attendu : un metadata.json sans `containerimage.digest`.
           if command -v jq >/dev/null 2>&1; then
             echo "clés de metadata.json par cible :" >&2
             jq -c 'map_values(if type == "object" then keys else . end)' metadata.json >&2
@@ -275,9 +306,11 @@ jobs:
           echo "ref=${image}@${digest}" >> "$GITHUB_OUTPUT"
           echo "${image}@${digest}"
 
-      # cosign-installer v4 développe install_dir avec envsubst, absent de l'image
-      # du runner (ni gettext, ni sudo pour l'installer) — le job mourrait en exit
-      # 127 APRÈS le push, donc image publiée mais ni signée ni scannée.
+      # Étape NÉCESSAIRE, pas une précaution : cosign-installer v4 développe
+      # install_dir avec envsubst, et `envsubst` est ABSENT de cette image de
+      # runner (mesuré le 2026-09-17 ; pas de gettext, et l'uid 1001 n'a pas de
+      # sudo pour l'installer). Sans ce shim le job meurt en exit 127 APRÈS le
+      # push : image publiée, ni signée ni scannée. Le supprimer casse la chaîne.
       - name: Ensure envsubst
         run: |
           set -euo pipefail
@@ -322,9 +355,10 @@ jobs:
           REF: ${{ steps.refs.outputs.ref }}
         run: |
           set -euo pipefail
-          # Binaire syft plutôt qu'anchore/sbom-action : l'action attache un SBOM par
-          # invocation, et le runner n'a pas de daemon Docker — syft lit le registre
-          # directement via ~/.docker/config.json.
+          # Binaire syft plutôt qu'anchore/sbom-action : l'action attache un SBOM
+          # par invocation. `registry:` fait lire le registre directement via
+          # ~/.docker/config.json, sans passer par un daemon local — l'image
+          # scannée est donc bien celle qui a été poussée, pas une copie locale.
           case "$(uname -m)" in
             x86_64)  arch=amd64 ;;
             aarch64|arm64) arch=arm64 ;;
