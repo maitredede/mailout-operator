@@ -40,7 +40,7 @@ jobs:
   go:
     uses: maitredede/ci/.github/workflows/go-ci.yml@f7c8befa0a4216b1923b902321b6018b97537acf # main 2026-09-07 (gofmt hors submodules)
     with:
-      runner: arc-runner-mailout-operator
+      runner: dede-mailout-operator
       # `go test ./...` ne lance que les tests unitaires : les trois autres
       # niveaux sont derrière les tags envtest / e2e / cluster.
       #
@@ -52,7 +52,7 @@ jobs:
   # kube-apiserver et etcd et les lance en processus.
   envtest:
     name: Envtest
-    runs-on: arc-runner-mailout-operator
+    runs-on: dede-mailout-operator
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
