@@ -1,7 +1,36 @@
 # Image mailout -> registre Zot interne (dkr.daly.nc), via bake multi-arch natif
 # sur les daemons BuildKit du cluster.
 #
-# Workflows réutilisables épinglés par SHA (politique de pin : README de maitredede/ci).
+# Ce dépôt est PUBLIC, et c'est ce qui décide de la forme de ce fichier : un dépôt
+# public ne peut PAS appeler un workflow réutilisable hébergé dans un dépôt privé.
+# `maitredede/ci` est privé, donc l'appel à `bake-images.yml` faisait échouer le run
+# au démarrage, sans produire un seul job et sans message exploitable
+# (`total_count: 0`, et GitHub refusait même de le relancer). Même verdict pour
+# l'action composite privée `maitredede/ci/.github/actions/setup-buildx-remote`.
+# Les deux sont donc recopiés ici — uniquement le chemin que CE dépôt emprunte,
+# options figées à leurs valeurs, sans les branches génériques inutilisées.
+# Conséquence assumée : ce fichier ne suit plus les évolutions de `maitredede/ci`.
+# C'est le prix du dépôt public, pas un oubli.
+#
+# ---------------------------------------------------------------------------
+# Pourquoi ce workflow NE PEUT PAS migrer vers `ubuntu-latest`
+# ---------------------------------------------------------------------------
+# Contrairement à ci.yaml, passé sur runners hébergés dans le même effort, ce
+# workflow reste sur `runs-on: dede-mailout-operator`, et c'est de la topologie
+# réseau, pas un oubli :
+#
+#  - il pousse vers `dkr.daly.nc`, un registre du LAN ;
+#  - il construit sur les daemons BuildKit `buildkitd-amd64.buildkit.svc` et
+#    `buildkitd-arm64.buildkit.svc`, eux aussi sur le LAN (Services du cluster) ;
+#  - il s'y authentifie par un certificat client mTLS monté sur l'HÔTE du runner
+#    (BUILDKIT_TLS_DIR ci-dessous).
+#
+# Aucun runner hébergé par GitHub n'atteint quoi que ce soit de tout cela.
+#
+# Corollaire à garder en tête quand ce workflow devient rouge : les DEUX
+# constructions, amd64 comme arm64, ont lieu sur des daemons DANS le cluster. Une
+# panne du cluster casse ce workflow où que vive le runner — l'avoir déplacé sur
+# dede n'y change rien. Ça vient de nous coûter une soirée de fausses pistes.
 name: Images
 
 on:
@@ -10,7 +39,6 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
-# Les permissions du job appelé sont déclarées sur le job `images` lui-même.
 permissions:
   contents: read
 
@@ -18,33 +46,300 @@ concurrency:
   group: images-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Préfixe de nom d'image (hôte du registre + projet) : bake le lie depuis
+  # l'environnement à la variable REGISTRY de docker-bake.hcl.
+  REGISTRY: dkr.daly.nc/mailout
+  REGISTRY_HOST: dkr.daly.nc
+  # Matériel mTLS client (ca.crt/tls.crt/tls.key) monté sur l'hôte du runner.
+  BUILDKIT_TLS_DIR: /certs/buildkit
+  # Versions d'outils épinglées, identiques à celles du workflow réutilisable : un
+  # outil non épinglé rend un build rouge sans qu'aucun commit ne l'explique.
+  BUILDX_VERSION: v0.37.0
+  COSIGN_VERSION: v2.5.2
+  TRIVY_VERSION: "0.74.0"
+  SYFT_VERSION: v1.51.1
+
 jobs:
-  images:
-    uses: maitredede/ci/.github/workflows/bake-images.yml@f7c8befa0a4216b1923b902321b6018b97537acf # main 2026-09-07 (gofmt hors submodules)
+  # ---------------------------------------------------------------------------
+  # Dérivation des tags et saut « diff de manifestes seulement ». Job séparé pour
+  # que le build entier puisse être sauté par un `if:` — filtrer avec
+  # `paths-ignore` sur le déclencheur filtrerait AUSSI les tags, et un v* ne
+  # publierait alors aucune image semver.
+  # ---------------------------------------------------------------------------
+  setup:
+    name: Compute tags
+    runs-on: dede-mailout-operator
+    timeout-minutes: 5
+    outputs:
+      skipped: ${{ steps.plan.outputs.skipped }}
+      tag: ${{ steps.plan.outputs.tag }}
+      extra_tag: ${{ steps.plan.outputs.extra_tag }}
+    steps:
+      # fetch-depth: 0 — le diff compare deux commits, et un clone superficiel ne
+      # contient pas forcément le point de départ du push.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Plan
+        id: plan
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
+          # Ni docs/ ni test/ n'entrent dans le contexte de build (.dockerignore),
+          # et config/ comme deploy/ n'influencent pas le binaire compilé :
+          # l'image finale ne contient que lui.
+          SKIP_RE: "^(config|deploy|docs)/"
+        run: |
+          set -euo pipefail
+          # Même dérivation que docker/metadata-action : v1.2.3 -> "1.2.3" + "1.2",
+          # sinon sha-<7> + edge.
+          if [[ "$REF" == refs/tags/v* ]]; then
+            version="${REF#refs/tags/v}"
+            tag="$version"
+            extra="$(printf '%s' "$version" | cut -d. -f1-2)"
+            [ "$extra" = "$version" ] && extra=""
+          else
+            tag="sha-${SHA:0:7}"
+            extra="edge"
+          fi
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
+          echo "extra_tag=$extra" >> "$GITHUB_OUTPUT"
+
+          # Le saut ne s'applique QUE sur un push de branche : un v* posé sur un
+          # commit de manifestes doit tout de même publier ses images semver.
+          skipped=false
+          if [ "$GITHUB_EVENT_NAME" = "push" ] &&
+             [[ "$REF" != refs/tags/* ]] &&
+             git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$BEFORE" "$SHA")
+            # `! grep -qvE` : aucune ligne HORS du motif, c'est-à-dire que TOUT le
+            # diff est dedans. Un fichier modifié à la racine suffit donc à
+            # construire. Un diff vide retombe délibérément sur « construire » —
+            # dans le doute, on construit.
+            if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qvE "$SKIP_RE"; then
+              echo "Diff limité à $SKIP_RE — aucune image ne peut avoir changé."
+              skipped=true
+            fi
+          fi
+          echo "skipped=$skipped" >> "$GITHUB_OUTPUT"
+
+  bake:
+    name: Bake & push
+    runs-on: dede-mailout-operator
+    needs: setup
+    if: needs.setup.outputs.skipped != 'true'
+    # Garde-fou contre une connexion gRPC buildx->buildkitd à moitié morte qui fige
+    # le job (4 h 45 observées sans timeout).
+    timeout-minutes: 45
     permissions:
       contents: read
-      # cosign keyless.
+      # cosign est en mode keyless : il a besoin du jeton OIDC du workflow. Sans
+      # `id-token: write`, la signature échoue APRÈS le push — image publiée, non
+      # signée.
       id-token: write
-    with:
-      runner: dede-mailout-operator
-      registry: dkr.daly.nc/mailout
-      bake-file: docker-bake.hcl
-      targets: default
+    env:
+      # bake lie ces variables depuis l'environnement, donc rien n'est passé en
+      # ligne de commande (cf. docker-bake.hcl).
+      TAG: ${{ needs.setup.outputs.tag }}
+      EXTRA_TAG: ${{ needs.setup.outputs.extra_tag }}
       # Les deux architectures, et c'est le point : le cluster est trois workers
       # arm64 et un amd64, et l'opérateur tourne deux replicas avec une
       # anti-affinité seulement preferred. Une image mono-arch obligerait à
       # épingler le Deployment sur une architecture — ou à laisser un replica
       # boucler sur « exec format error ».
-      platforms: linux/amd64,linux/arm64
-      # Ni docs/ ni test/ n'entrent dans le contexte de build (.dockerignore), et
-      # config/ comme deploy/ n'influencent pas le binaire compilé : l'image
-      # finale ne contient que lui. Jamais appliqué à un tag (cf. bake-images) :
-      # un v* posé sur un commit de manifestes doit tout de même publier ses
-      # images semver.
-      skip-paths-regexp: "^(config|deploy|docs)/"
-      cosign: true
-      trivy: true
-      sbom: true
-    secrets:
-      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      PLATFORMS: linux/amd64,linux/arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # buildx en binaire autonome : le runner n'a pas de daemon Docker, donc
+      # `docker/setup-buildx-action` et `docker/build-push-action` ne peuvent pas
+      # fonctionner. On appelle `buildx` directement (bake, imagetools).
+      - name: Install buildx (standalone)
+        run: |
+          set -euo pipefail
+          # Architecture de l'asset dérivée du runner, pas d'un amd64 en dur.
+          case "$(uname -m)" in
+            x86_64)  arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "::error::architecture de runner non supportée $(uname -m)" >&2; exit 1 ;;
+          esac
+          mkdir -p "$HOME/bin"
+          curl -fsSL -o "$HOME/bin/buildx" \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-${arch}"
+          chmod +x "$HOME/bin/buildx"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/buildx" version
+
+      # Un seul builder à deux nœuds, chacun épinglé à une plateforme par
+      # `--platform` : un seul `bake` dispatche chaque plateforme vers son daemon
+      # natif. Pas de QEMU, pas de matrice, pas de job de fusion. L'architecture du
+      # runner est sans objet — la construction a lieu sur les daemons.
+      - name: Create multi-node remote builder
+        run: |
+          set -euo pipefail
+          for f in ca.crt tls.crt tls.key; do
+            [ -r "${BUILDKIT_TLS_DIR}/${f}" ] || {
+              echo "::error::${BUILDKIT_TLS_DIR}/${f} manquant — le matériel mTLS client est-il monté sur l'hôte du runner ?" >&2
+              exit 1
+            }
+          done
+          append=""
+          # `servername` doit correspondre à un SAN du certificat du daemon : c'est
+          # l'hôte de l'endpoint.
+          for entry in \
+            "linux/amd64=tcp://buildkitd-amd64.buildkit.svc:1234" \
+            "linux/arm64=tcp://buildkitd-arm64.buildkit.svc:1234"
+          do
+            platform="${entry%%=*}"
+            endpoint="${entry#*=}"
+            host="${endpoint#tcp://}"; host="${host%%:*}"
+            node="remote-$(printf '%s' "$platform" | tr '/' '-')"
+            # shellcheck disable=SC2086
+            buildx create --name remote $append \
+              --node "$node" \
+              --driver remote \
+              --platform "$platform" \
+              --driver-opt "cacert=${BUILDKIT_TLS_DIR}/ca.crt" \
+              --driver-opt "cert=${BUILDKIT_TLS_DIR}/tls.crt" \
+              --driver-opt "key=${BUILDKIT_TLS_DIR}/tls.key" \
+              --driver-opt "servername=${host}" \
+              "$endpoint"
+            append="--append"
+          done
+          buildx use remote
+          buildx inspect --bootstrap remote
+
+      # Pas de `docker/login-action` : il fait un `docker login`, donc il exige la
+      # CLI Docker, que l'image du runner n'a pas (et il n'y a pas de daemon non
+      # plus — la construction est sur les daemons distants). On écrit directement
+      # le fichier d'identifiants que buildx, cosign, trivy et syft lisent tous.
+      # Remplacer ceci par login-action casse en silence.
+      - name: Registry login (config.json)
+        env:
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.docker"
+          auth=$(printf '%s:%s' "$REGISTRY_USER" "$REGISTRY_PASSWORD" | base64 -w0)
+          printf '{"auths":{"%s":{"auth":"%s"}}}' "$REGISTRY_HOST" "$auth" > "$HOME/.docker/config.json"
+
+      - name: Bake & push
+        run: |
+          set -euo pipefail
+          buildx bake \
+            --builder remote \
+            --file docker-bake.hcl \
+            --provenance=mode=max \
+            --push \
+            --metadata-file metadata.json \
+            default
+          test -s metadata.json
+
+      # Référence `image@digest` de l'unique image publiée, consommée par les trois
+      # étapes de sécurité qui suivent. C'est le digest de l'index — pas un tag —
+      # qui est signé et scanné, donc un écrasement concurrent d'un tag mutable ne
+      # peut pas passer la porte.
+      #
+      # Le nom de l'image est écrit ici plutôt que déduit de metadata.json : ce
+      # dépôt a UNE cible, `operator`, et metadata.json n'est pas un contrat stable
+      # — avec le builder à deux nœuds (deux builds par plateforme fusionnés en un
+      # index), une cible peut ne porter que `containerimage.digest` et pas
+      # `image.name`, ou l'inverse (observé le 2026-09-07). Le digest garde donc son
+      # repli sur `imagetools inspect`.
+      - name: Collect pushed reference
+        id: refs
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/operator"
+          digest=""
+          # jq n'est pas garanti sur cet hôte de runner : son absence n'est pas une
+          # erreur, elle renvoie simplement au repli `imagetools inspect`.
+          if command -v jq >/dev/null 2>&1; then
+            echo "clés de metadata.json par cible :" >&2
+            jq -c 'map_values(if type == "object" then keys else . end)' metadata.json >&2
+            digest=$(jq -r '.operator["containerimage.digest"] // ""' metadata.json)
+          fi
+          if [ -z "$digest" ]; then
+            echo "pas de containerimage.digest dans metadata.json, inspection de ${image}:${TAG}" >&2
+            digest=$(buildx imagetools inspect "${image}:${TAG}" --format '{{.Manifest.Digest}}')
+          fi
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "::error::digest inexploitable pour ${image} : '${digest}'" >&2; exit 1 ;;
+          esac
+          echo "ref=${image}@${digest}" >> "$GITHUB_OUTPUT"
+          echo "${image}@${digest}"
+
+      # cosign-installer v4 développe install_dir avec envsubst, absent de l'image
+      # du runner (ni gettext, ni sudo pour l'installer) — le job mourrait en exit
+      # 127 APRÈS le push, donc image publiée mais ni signée ni scannée.
+      - name: Ensure envsubst
+        run: |
+          set -euo pipefail
+          command -v envsubst >/dev/null 2>&1 && exit 0
+          mkdir -p "$HOME/bin"
+          {
+            echo '#!/usr/bin/env python3'
+            echo 'import os, string, sys'
+            echo 'sys.stdout.write(string.Template(sys.stdin.read()).safe_substitute(os.environ))'
+          } > "$HOME/bin/envsubst"
+          chmod +x "$HOME/bin/envsubst"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Sign image (keyless)
+        env:
+          REF: ${{ steps.refs.outputs.ref }}
+        run: cosign sign --yes "$REF"
+
+      - name: Trivy scan
+        env:
+          REF: ${{ steps.refs.outputs.ref }}
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64)  asset=Linux-64bit ;;
+            aarch64|arm64) asset=Linux-ARM64 ;;
+            *) echo "::error::architecture de runner non supportée $(uname -m)" >&2; exit 1 ;;
+          esac
+          mkdir -p "$HOME/bin"
+          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_${asset}.tar.gz" \
+            | tar -xz -C "$HOME/bin" trivy
+          # --ignore-unfixed : on ne bloque que sur ce qui est corrigeable en amont.
+          "$HOME/bin/trivy" image --exit-code 1 --severity CRITICAL --ignore-unfixed "$REF"
+
+      - name: Generate SBOM
+        env:
+          REF: ${{ steps.refs.outputs.ref }}
+        run: |
+          set -euo pipefail
+          # Binaire syft plutôt qu'anchore/sbom-action : l'action attache un SBOM par
+          # invocation, et le runner n'a pas de daemon Docker — syft lit le registre
+          # directement via ~/.docker/config.json.
+          case "$(uname -m)" in
+            x86_64)  arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "::error::architecture de runner non supportée $(uname -m)" >&2; exit 1 ;;
+          esac
+          v="${SYFT_VERSION#v}"
+          mkdir -p "$HOME/bin" sbom
+          curl -fsSL "https://github.com/anchore/syft/releases/download/v${v}/syft_${v}_linux_${arch}.tar.gz" \
+            | tar -xz -C "$HOME/bin" syft
+          "$HOME/bin/syft" "registry:${REF}" -o spdx-json=sbom/operator.spdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ needs.setup.outputs.tag }}
+          path: sbom/*.spdx.json
+          if-no-files-found: error
+          retention-days: 30
