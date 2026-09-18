@@ -1,27 +1,37 @@
-# CI mailout-operator, sur le runner ARC de dalykube.
+# CI mailout-operator, sur les runners hébergés par GitHub.
 #
-# Workflows réutilisables épinglés par SHA (politique de pin : README de maitredede/ci).
+# Ce dépôt est PUBLIC, et c'est ce qui décide de tout ici :
 #
-# Tout tourne sur le runner ARC de dalykube. Pas de job ubuntu-latest : sur ce
-# dépôt privé, GitHub refuse de démarrer les runners hébergés (« recent account
-# payments have failed or your spending limit needs to be increased »).
+#  - les runners hébergés y sont gratuits et sans quota, donc l'ancienne raison de
+#    tourner sur un runner auto-hébergé (« GitHub refuse de démarrer les runners
+#    hébergés », un problème de facturation qui ne vise que les dépôts privés) ne
+#    s'applique plus ;
+#  - un dépôt public ne peut PAS appeler un workflow réutilisable hébergé dans un
+#    dépôt privé. `maitredede/ci` est privé : l'appel à `go-ci.yml` faisait échouer
+#    le run au démarrage, sans produire un seul job et sans message exploitable
+#    (`total_count: 0`, et GitHub refusait même de le relancer). Les étapes du job
+#    `go` sont donc recopiées ici plutôt qu'appelées.
 #
-# Conséquence assumée : `make test-e2e` et `make test-cluster` ne tournent pas en
-# CI. Ils pilotent des conteneurs (testcontainers → Mailpit, ClamAV, Valkey, un
-# k3s entier) et exigent une API Docker que le runner ARC n'a pas : les images
-# partent vers les daemons BuildKit distants, il n'y a pas de socket Docker, et le
-# namespace arc-runners est en Pod Security « restricted » — donc pas de DinD
-# privilégié non plus.
+# Conséquence de cette recopie : ce fichier ne suit plus les évolutions de
+# `maitredede/ci`. C'est le prix du dépôt public, pas un oubli. Si `ci` devenait
+# public, ce job redeviendrait un `uses:` d'une ligne.
 #
-# Or ce sont eux qui trouvent le plus de bugs, et les seuls à vérifier les deux
-# replicas, le leader unique et le cloisonnement des locataires. À lancer
-# localement avant de pousser :
+# Un gain au passage : `go test -race` est ACTIVÉ ici. Il ne l'était pas sur le
+# runner ARC parce que le détecteur de course exige cgo et que l'image
+# ghcr.io/actions/actions-runner n'embarque pas de compilateur C. Les runners
+# hébergés en ont un.
+#
+# Ce qui ne tourne toujours pas en CI, inchangé : `make test-e2e` et
+# `make test-cluster`. Ils pilotent des conteneurs (testcontainers → Mailpit,
+# ClamAV, Valkey, un k3s entier). Un runner hébergé a un daemon Docker, donc la
+# barrière technique d'hier est levée — mais les y ramener est une décision à
+# prendre, pas un effet de bord de cette migration. À lancer localement avant de
+# pousser :
 #
 #   make test-e2e test-cluster
 #
-# Les rapatrier en CI demanderait un scale set dédié avec une PSA relâchée et un
-# sidecar DinD privilégié — soit exactement l'exception que « restricted » est là
-# pour empêcher.
+# Les versions d'outils sont épinglées : un linter ou un scanner non épinglé rend
+# un build rouge sans qu'aucun commit ne l'explique.
 name: CI
 
 on:
@@ -38,21 +48,58 @@ concurrency:
 
 jobs:
   go:
-    uses: maitredede/ci/.github/workflows/go-ci.yml@f7c8befa0a4216b1923b902321b6018b97537acf # main 2026-09-07 (gofmt hors submodules)
-    with:
-      runner: arc-runner-mailout-operator
-      # `go test ./...` ne lance que les tests unitaires : les trois autres
-      # niveaux sont derrière les tags envtest / e2e / cluster.
-      #
-      # `race: false` (défaut du workflow réutilisable) : le détecteur de course
-      # exige cgo, absent de l'image ghcr.io/actions/actions-runner.
+    name: Go
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+          cache: true
+
+      - name: gofmt
+        run: |
+          set -euo pipefail
+          # Seulement les fichiers suivis par CE dépôt : `gofmt -l .` parcourrait
+          # aussi les sous-modules git et les arbres vendorisés.
+          out=$(git ls-files -z -- '*.go' | xargs -0 -r gofmt -l)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt would reformat:"; printf '%s\n' "$out"; exit 1
+          fi
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race : voir l'en-tête. Ne lance que les tests unitaires ; les trois
+      # autres niveaux sont derrière les tags envtest / e2e / cluster.
+      - name: go test
+        run: go test -race ./...
+
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.2
+
+      - name: govulncheck
+        env:
+          # Épinglé : @latest rendrait le build non reproductible.
+          GOVULNCHECK_VERSION: v1.7.0
+        run: |
+          set -euo pipefail
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          "$(go env GOPATH)/bin/govulncheck" ./...
 
   # Niveau 2 des tests : contrôleurs et webhooks contre un vrai control plane.
   # Pas de conteneur là-dedans — setup-envtest télécharge les binaires
   # kube-apiserver et etcd et les lance en processus.
   envtest:
     name: Envtest
-    runs-on: arc-runner-mailout-operator
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -63,10 +110,10 @@ jobs:
           cache-dependency-path: go.sum
           cache: true
 
-      # Les recettes du Makefile sont recopiées ici plutôt qu'appelées : l'image
-      # ghcr.io/actions/actions-runner n'embarque pas make, et le runner tourne
-      # en uid 1001 sans sudo, donc rien à installer. C'est pour la même raison
-      # que le workflow réutilisable go-ci appelle `go` directement.
+      # Les recettes du Makefile sont recopiées ici plutôt qu'appelées : le runner
+      # ARC n'embarquait pas make. Un runner hébergé en a un — les remplacer par
+      # `make manifests` est possible, et volontairement laissé pour un changement
+      # qui ne mélange pas deux sujets.
       #
       # controller-gen produit les CRD et le code deepcopy. S'ils diffèrent de ce
       # qui est versionné, un `make manifests` a été oublié : le cluster
@@ -94,4 +141,3 @@ jobs:
           test -n "$version" || { echo "::error::ENVTEST_K8S_VERSION introuvable dans le Makefile"; exit 1; }
           KUBEBUILDER_ASSETS="$(go tool setup-envtest use "$version" -p path)" \
             go test ./internal/controller/... ./internal/webhook/... -count=1 -tags=envtest
-
